@@ -165,6 +165,13 @@ def make_router(state):
             response.headers["ETag"] = etag("tags", db.tags_revision())
             return values
 
+    @api.get("/tags/next-id")
+    def next_tag_id(response: Response):
+        with admin_lock:
+            next_id, revision = db.next_tag_id()
+            response.headers["ETag"] = etag("tags", revision)
+            return {"next_id": next_id}
+
     @api.put("/tags")
     def replace(items: list[Tag], request: Request, response: Response):
         require_admin(request)

@@ -75,13 +75,14 @@ test('copying a point for a new address adds a new ID and preserves the original
   let written;
   const state = appFixture(async (url, options) => {
     if (url === '/api/config') return response({ mode: 'simulation', endpoint: 'opc.tcp://localhost:4840' });
+    if (url === '/api/tags/next-id') return response({ next_id: 5 });
     if (url === '/api/tags') {
       if (options.method === 'PUT') written = JSON.parse(options.body);
       return response([original]);
     }
     throw new Error('Unexpected request: ' + url);
   });
-  state.managerPin.value = 'operator'; await state.refresh(); state.editTag(state.tags.value[0]); state.copyTag();
+  state.managerPin.value = 'operator'; await state.refresh(); await state.editTag(state.tags.value[0]); await state.copyTag();
   assert.equal(state.editingOriginal.value, null); assert.equal(state.editing.value.id, 5);
   assert.equal(state.editing.value.revision, undefined);
   state.editing.value.address = 'DB1.DBD24'; state.editing.value.node_id = 'ns=2;s=Vacuum2';
@@ -105,13 +106,14 @@ test('new points default to timed history and an explicit change recording choic
   let written;
   const state = appFixture(async (url, options) => {
     if (url === '/api/config') return response({ mode: 'simulation', endpoint: 'opc.tcp://localhost:4840' });
+    if (url === '/api/tags/next-id') return response({ next_id: 1 });
     if (url === '/api/tags') {
       if (options.method === 'PUT') written = JSON.parse(options.body);
       return response([]);
     }
     throw new Error('Unexpected request: ' + url);
   });
-  state.managerPin.value = 'operator'; await state.refresh(); state.editTag();
+  state.managerPin.value = 'operator'; await state.refresh(); await state.editTag();
   assert.equal(state.editing.value.record_changes, false);
   Object.assign(state.editing.value, { name: '真空', address: 'D100', device: '泵01', record_changes: true,
     history_interval_seconds: '1800', threshold: '0.00005' });

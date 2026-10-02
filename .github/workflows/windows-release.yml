@@ -112,6 +112,10 @@ jobs:
           本发布已通过 Windows 上真实 EXE 的独立启动、离线界面、6 点采集、Excel 模板、SQLite 持久化、重复启动和正常退出测试。真实 PLC 需现场验收。
           ZIP 包含第三方许可证及 opcua LGPL 原始源码。SHA256SUMS.txt 可核对下载文件。
           "@ | Set-Content -LiteralPath $notes -Encoding utf8
+          $versionNotes = Join-Path $env:GITHUB_WORKSPACE "docs/releases/v${env:APP_VERSION}.md"
+          if (Test-Path -LiteralPath $versionNotes) {
+            Get-Content -LiteralPath $versionNotes -Raw | Set-Content -LiteralPath $notes -Encoding utf8
+          }
           $assets = @('dist/windows/IndustrialAIGateway.exe', "dist/windows/Industrial_AI_Gateway-v${env:APP_VERSION}-windows-x64.zip", 'dist/windows/SHA256SUMS.txt', 'dist/windows/BUILD_INFO.json', 'dist/windows/WINDOWS_SMOKE_REPORT.json')
           gh release view $env:GITHUB_REF_NAME *> $null
           if ($LASTEXITCODE -eq 0) {
