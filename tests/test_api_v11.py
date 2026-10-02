@@ -155,24 +155,38 @@ def test_readiness_reflects_writer_failure_without_affecting_liveness(client, mo
     assert client.get("/api/current").json()["good"] == 2
 
 
-def test_stalled_event_database_does_not_block_diagnostics(client, monkeypatch):
-    entered, released = threading.Event(), threading.Event()
-    original = client.app.state.db.events
+def test_stalled_event_database_does_not_block_diagnostics(installation, monkeypatch):
+    app = create_app(installation)
+    entered, released, stall_expired = threading.Event(), threading.Event(), threading.Event()
+    original = app.state.db.events
+
     def stalled(*args, **kwargs):
         entered.set()
-        released.wait(3)
+        # Keep the database unavailable throughout all measurements. The watchdog
+        # also lets a regressed synchronous request finish and fail its latency
+        # assertion, rather than hanging the test process indefinitely.
+        if not released.wait(20):
+            stall_expired.set()
         return original(*args, **kwargs)
-    monkeypatch.setattr(client.app.state.db, "events", stalled)
-    try:
-        assert entered.wait(2)
-        elapsed = []
-        for path in ("/api/current", "/api/ready", "/api/diagnostics"):
-            start = time.perf_counter()
-            assert client.get(path).status_code in (200, 503)
-            elapsed.append(time.perf_counter() - start)
-        assert max(elapsed) < .5
-    finally:
-        released.set()
+
+    # Install the fault before startup: otherwise this races both the first
+    # audit writes and the monitor's one-second polling interval on Windows.
+    monkeypatch.setattr(app.state.db, "events", stalled)
+    with TestClient(app) as client:
+        try:
+            assert entered.wait(10), "operations worker did not reach the injected database stall"
+            elapsed = []
+            for path in ("/api/current", "/api/ready", "/api/diagnostics"):
+                start = time.perf_counter()
+                assert client.get(path).status_code in (200, 503)
+                elapsed.append(time.perf_counter() - start)
+            assert not stall_expired.is_set(), "database stall ended before diagnostics measurements finished"
+            assert max(elapsed) < .5
+        finally:
+            # Always unblock the worker before TestClient begins shutdown.
+            released.set()
+    assert app.state.shutdown_result["drained"]
+    assert app.state.shutdown_result["operations_stopped"]
 
 
 def test_credentials_are_not_returned_or_logged(client, monkeypatch):
