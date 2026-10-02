@@ -220,6 +220,7 @@ async function main() {
       assert.equal(await rows.count(), 1); assert.equal(await rows.locator('td').first().innerText(), '1');
       await search.fill('');
       await page.reload(); await selectPage(page, '点位管理');
+      await rows.filter({ hasText: '删除后复制温度' }).waitFor();
       assert.deepEqual(await rows.locator('td:first-child').allTextContents(), ['1', '2', '3', '4', '5', '6', '7', '8', '9']);
       const pin = (await fs.readFile(path.join(root, 'data/operator_pin.txt'), 'utf8')).trim();
       await page.getByLabel('本机管理口令', { exact: true }).fill(pin);
