@@ -1,0 +1,7 @@
+# Keep source checkouts consistent across macOS and Windows.
+* text=auto eol=lf
+
+# Upstream legal texts and source archives are verified byte for byte.
+# Git must not alter their line endings during checkout or staging.
+packaging/licenses/** -text
+packaging/third_party_sources/** -text

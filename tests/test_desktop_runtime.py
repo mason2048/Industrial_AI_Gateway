@@ -30,7 +30,7 @@ def test_fresh_installation_has_six_explicit_simulation_points_without_history(t
     root = tmp_path / "installation"
     with ProcessLock(root):
         desktop.initialize_installation(root, resources)
-    config = json.loads((root / "config/config.json").read_text())
+    config = json.loads((root / "config/config.json").read_text(encoding="utf-8"))
     assert config["mode"] == "simulation"
     assert config["endpoint"] == desktop.SAFE_ENDPOINT
     assert config["simulation_write_enabled"] is False
@@ -54,10 +54,10 @@ def test_upgrade_refreshes_resources_and_preserves_configuration_database_and_ex
     (root / "frontend/index.html").write_text("old interface", encoding="utf-8")
     with ProcessLock(root):
         desktop.initialize_installation(root, resources)
-    assert config.read_text() == '{"mode":"opcua","username":"private-account"}'
+    assert config.read_text(encoding="utf-8") == '{"mode":"opcua","username":"private-account"}'
     assert (root / "data/history.db").read_bytes() == b"existing-real-history"
     assert (root / "data/tags.xlsx").read_bytes() == b"existing-field-point-definitions"
-    assert (root / "frontend/index.html").read_text() == "new frontend"
+    assert (root / "frontend/index.html").read_text(encoding="utf-8") == "new frontend"
     assert not list(root.glob(".frontend-*"))
 
 
@@ -78,7 +78,7 @@ def test_missing_configuration_with_existing_history_is_not_replaced(tmp_path, r
 ])
 def test_installation_rejects_bundle_with_field_connection_data(tmp_path, resources, field, value):
     (resources / "config").mkdir()
-    (resources / "config/config.default.json").write_text(json.dumps({field: value}))
+    (resources / "config/config.default.json").write_text(json.dumps({field: value}), encoding="utf-8")
     root = tmp_path / "installation"
     with ProcessLock(root), pytest.raises(desktop.DesktopError, match="现场配置"):
         desktop.initialize_installation(root, resources)
@@ -89,11 +89,11 @@ def test_installation_rejects_bundle_with_field_connection_data(tmp_path, resour
 def test_existing_frontend_remains_when_bundle_is_incomplete(tmp_path, resources):
     root = tmp_path / "installation"
     (root / "frontend").mkdir(parents=True)
-    (root / "frontend/index.html").write_text("previous-version")
+    (root / "frontend/index.html").write_text("previous-version", encoding="utf-8")
     (resources / "frontend/vendor/vue.global.prod.js").unlink()
     with ProcessLock(root), pytest.raises(desktop.DesktopError, match="缺少网页资源"):
         desktop.initialize_installation(root, resources)
-    assert (root / "frontend/index.html").read_text() == "previous-version"
+    assert (root / "frontend/index.html").read_text(encoding="utf-8") == "previous-version"
 
 
 def test_root_uses_portable_then_fallback_and_preserves_existing_choice(tmp_path, monkeypatch):
@@ -104,7 +104,7 @@ def test_root_uses_portable_then_fallback_and_preserves_existing_choice(tmp_path
     monkeypatch.setattr(desktop, "_writable_directory", lambda root: root != portable)
     assert desktop.resolve_root(executable=executable, local_app_data=local) == fallback
     (fallback / "config").mkdir(parents=True)
-    (fallback / "config/config.json").write_text("{}")
+    (fallback / "config/config.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(desktop, "_writable_directory", lambda root: True)
     assert desktop.resolve_root(executable=executable, local_app_data=local) == fallback
     # A changed permission cannot silently send an installation to another root.
@@ -117,7 +117,7 @@ def test_stop_root_resolution_requires_no_write_probe(tmp_path, monkeypatch):
     executable = tmp_path / "program/IndustrialAIGateway.exe"
     fallback = tmp_path / "local/IndustrialAIGateway"
     (fallback / "config").mkdir(parents=True)
-    (fallback / "config/config.json").write_text("{}")
+    (fallback / "config/config.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(desktop, "_writable_directory", lambda root: pytest.fail("must not probe"))
     assert desktop.resolve_root(executable=executable, local_app_data=fallback.parent,
                                 write_probe=False) == fallback
@@ -146,8 +146,8 @@ def test_check_creates_machine_readable_result_without_collecting(tmp_path, monk
     monkeypatch.setattr(desktop, "bundle_root", lambda: ROOT)
     assert desktop.main(["--root", str(root), "--check"]) == 0
     printed = json.loads(capsys.readouterr().out)
-    stored = json.loads((root / "check-result.json").read_text())
-    assert stored == printed == json.loads((root / "data/desktop-check.json").read_text())
+    stored = json.loads((root / "check-result.json").read_text(encoding="utf-8"))
+    assert stored == printed == json.loads((root / "data/desktop-check.json").read_text(encoding="utf-8"))
     assert stored["ok"] and stored["mode"] == "simulation" and stored["read_only"]
     assert not stored["database_exists"]
     assert not (root / "data/history.db").exists()
@@ -164,8 +164,8 @@ def test_safe_errors_never_log_credentials(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(launch, "check_installation", failure)
     assert desktop.main(["--root", str(root), "--check"]) == 1
     output = capsys.readouterr()
-    result = json.loads((root / "check-result.json").read_text())
-    logs = (root / "logs/desktop.log").read_text()
+    result = json.loads((root / "check-result.json").read_text(encoding="utf-8"))
+    logs = (root / "logs/desktop.log").read_text(encoding="utf-8")
     assert result["error"] == "startup_failed"
     assert secret not in output.err + output.out + json.dumps(result) + logs
     assert "ValueError" in logs
@@ -212,12 +212,12 @@ def test_desktop_subprocess_starts_six_points_reuses_instance_and_stops_cleanly(
             pytest.fail("Desktop gateway did not collect six Good simulation points")
         assert len(snapshot["items"]) == 6
         assert (tmp_path / "data/history.db").is_file()
-        owner = json.loads((tmp_path / "data/gateway.pid").read_text())
+        owner = json.loads((tmp_path / "data/gateway.pid").read_text(encoding="utf-8"))
         again = subprocess.run([*command, "--no-browser"], capture_output=True, text=True,
                                cwd=ROOT, timeout=20)
         assert again.returncode == 0, again.stderr
         assert json.loads(again.stdout)["existing_instance"]
-        assert json.loads((tmp_path / "data/gateway.pid").read_text())["token"] == owner["token"]
+        assert json.loads((tmp_path / "data/gateway.pid").read_text(encoding="utf-8"))["token"] == owner["token"]
         stop = subprocess.run([*command, "--stop"], capture_output=True, text=True, cwd=ROOT, timeout=40)
         assert stop.returncode == 0 and json.loads(stop.stdout)["stopped"], stop.stderr
         assert child.wait(timeout=5) == 0, child.stdout.read()

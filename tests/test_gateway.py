@@ -110,7 +110,13 @@ def test_end_to_end_api_permissions_and_replay(app_root):
         for route in ['/','/api/health','/api/config','/api/tags','/api/ai/current','/api/ai/status','/api/ai/history','/openapi.json']:
             assert c.get(route).status_code==200,route
         assert c.get('/api/ai/status').json()['health']=='unknown'
-        result=c.post('/api/ai/query',json={'question':'分析今天真空变化','device':'真空泵01'}).json()
+        # Realtime becomes healthy before the independent writer commits its
+        # first batch. Wait for the observable history result, not a fixed sleep.
+        deadline=time.monotonic()+5
+        while True:
+            result=c.post('/api/ai/query',json={'question':'分析今天真空变化','device':'真空泵01'}).json()
+            if result['evidence_count']>=1 or time.monotonic()>=deadline: break
+            time.sleep(.05)
         assert result['evidence_count']>=1 and not result['plc_write_allowed']
         assert c.post('/api/ai/write',json={'tag_id':1,'value':2}).status_code in (404,405)
         assert c.get('/api/current',headers={'Host':'evil.example'}).status_code==403

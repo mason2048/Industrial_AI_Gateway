@@ -33,17 +33,25 @@ jobs:
         with:
           node-version: '22'
       - name: Install locked dependencies
+        shell: pwsh
         run: |
           python -m pip install -r requirements-build-lock.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Locked dependency installation failed.' }
           python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'Installed dependency compatibility check failed.' }
       - name: Validate application and safe packaging
+        shell: pwsh
         run: |
           python -m pytest -q --disable-warnings tests
+          if ($LASTEXITCODE -ne 0) { throw 'Application and packaging tests failed.' }
           node --test tests/frontend_v11.test.cjs tests/frontend_basic.test.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
       - name: Build self-contained Windows x64 program
         shell: pwsh
         run: |
-          $version = (python -c "from backend.version import APP_VERSION; print(APP_VERSION)").Trim()
+          $versionOutput = python -c "from backend.version import APP_VERSION; print(APP_VERSION)"
+          if ($LASTEXITCODE -ne 0) { throw 'Application version lookup failed.' }
+          $version = $versionOutput.Trim()
           if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
             throw 'Release tag must match backend/version.py.'
           }
