@@ -19,6 +19,12 @@ from backend.opcua_client import Gateway, OPCUADriver
 from backend.storage import HistoryWriter, SampleBatch
 
 
+# Durability checks can require many independent WAL commits. Allow loaded
+# Windows disks to finish them; acquisition/diagnostics latency assertions below
+# keep their own, much shorter limits and do not use this completion budget.
+STORAGE_COMPLETION_TIMEOUT = 20
+
+
 def tag(number=1, **changes):
     values = dict(id=number, address=f"A{number}", name=f"Point{number}",
                   type="WORD", node_id=f"ns=2;s=Point{number}", device="Pump")
@@ -274,7 +280,8 @@ def test_fifo_retry_evicts_oldest_waiting_and_persists_gap(db, monkeypatch):
         released.set()
         with writer._condition:
             writer._condition.notify_all()
-        wait_for(lambda: writer.diagnostics()["pending_batches"] == 0)
+        wait_for(lambda: writer.diagnostics()["pending_batches"] == 0,
+                 timeout=STORAGE_COMPLETION_TIMEOUT)
     finally:
         result = writer.stop(3)
     assert result["drained"] and result["storage_stopped"]
@@ -525,7 +532,9 @@ def test_sixty_seconds_of_samples_recover_in_order_after_database_outage(db, mon
     writer.start()
     try:
         writer.enqueue(batch(1))
-        assert failed.wait(2)
+        # Startup includes committing the writer's recovery metadata; wait for
+        # fault injection before asserting anything about the buffered samples.
+        assert failed.wait(10)
         # Each batch carries a one-second-later wall and monotonic sample clock.
         # No real 60-second sleep is necessary to exercise the retention boundary.
         for second in range(2, 61):
@@ -535,10 +544,13 @@ def test_sixty_seconds_of_samples_recover_in_order_after_database_outage(db, mon
         recover.set()
         with writer._condition:
             writer._condition.notify_all()
-        wait_for(lambda: writer.diagnostics()["pending_batches"] == 0)
+        # This checks eventual lossless recovery, not a 60-commit speed target.
+        wait_for(lambda: writer.diagnostics()["pending_batches"] == 0,
+                 timeout=STORAGE_COMPLETION_TIMEOUT)
     finally:
         recover.set()
-        assert writer.stop(3)["drained"]
+        result = writer.stop(STORAGE_COMPLETION_TIMEOUT)
+        assert result["drained"] and result["storage_stopped"]
     with db.connect() as conn:
         rows = conn.execute("SELECT timestamp,value FROM history_data ORDER BY id").fetchall()
     assert [row["timestamp"] for row in rows] == [batch(second).timestamp for second in range(1, 61)]
@@ -591,5 +603,6 @@ def test_thousand_point_snapshot_p95_under_blocked_plc_and_database(tmp_path, mo
         print(f"1000-point snapshot 50-read P95 under blocked PLC/DB: {p95*1000:.2f} ms")
     finally:
         release.set()
-        result = gateway.stop(3)
+        # Persisting the released 1000-point batch is outside the measured P95.
+        result = gateway.stop(STORAGE_COMPLETION_TIMEOUT)
     assert result["collector_stopped"] and result["storage_stopped"] and result["drained"]
