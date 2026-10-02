@@ -85,9 +85,9 @@ async function main() {
   server.stderr.on('data', chunk => { serverLog += chunk.toString(); });
   server.on('error', error => { spawnError = error; });
   const checks = [], screenshots = [], pageErrors = [], consoleErrors = [], benignConsole = [];
-  const capture = async name => {
+  const capture = async (name, { fullPage = false } = {}) => {
     const filename = path.join(root, name + '.png');
-    await page.screenshot({ path: filename, fullPage: false }); screenshots.push(filename);
+    await page.screenshot({ path: filename, fullPage }); screenshots.push(filename);
   };
   const step = async (name, operation) => { await operation(); checks.push(name); console.log('PASS ' + name); };
   try {
@@ -165,7 +165,66 @@ async function main() {
         assert.ok(xml.includes(column) || xml.includes(escaped), 'Missing template column ' + column);
       }
     });
-    await step('05 mobile first viewport remains usable and has no document overflow', async () => {
+    await step('05 deleted point IDs are skipped automatically while visible row numbers stay continuous', async () => {
+      const pointDialog = () => page.getByRole('dialog', { name: '编辑点位' });
+      async function saveDraft(id, name, address) {
+        const dialog = pointDialog(), identity = dialog.getByLabel(/点位ID/);
+        await eventually(() => identity.inputValue().then(value => Number(value) === id), 'New point ID was not allocated');
+        assert.ok(await identity.isDisabled() || await identity.getAttribute('readonly') !== null, 'Point ID must be automatic');
+        await dialog.getByLabel('变量名称', { exact: true }).fill(name);
+        await dialog.getByLabel('PLC原始地址（用于识别）', { exact: true }).fill(address);
+        const saved = page.waitForResponse(response => new URL(response.url()).pathname === '/api/tags'
+          && response.request().method() === 'PUT');
+        await dialog.getByRole('button', { name: '保存点位', exact: true }).click();
+        assert.equal((await saved).status(), 200);
+        await dialog.waitFor({ state: 'hidden' });
+        await page.locator('table tbody tr').filter({ hasText: name }).waitFor();
+      }
+      for (const id of [7, 8, 9]) {
+        await page.getByRole('button', { name: '＋ 新增点位', exact: true }).click();
+        await saveDraft(id, `删除回归点${id}`, `REGRESSION.OLD.${id}`);
+      }
+      await eventually(async () => {
+        const catalog = await fetch(base + '/api/history/variables?source=simulation').then(response => response.json());
+        return [8, 9].every(id => catalog.items.some(row => row.tag_id === id));
+      }, 'Points to be deleted have no persisted history');
+      async function deletePoint(id) {
+        const row = page.locator('table tbody tr').filter({ hasText: `删除回归点${id}` });
+        page.once('dialog', dialog => dialog.accept());
+        const deleted = page.waitForResponse(response => new URL(response.url()).pathname === '/api/tags'
+          && response.request().method() === 'PUT');
+        await row.getByRole('button', { name: '删除', exact: true }).click();
+        assert.equal((await deleted).status(), 200);
+        await row.waitFor({ state: 'hidden' });
+      }
+      await deletePoint(8); await deletePoint(9);
+      await page.getByRole('button', { name: '＋ 新增点位', exact: true }).click();
+      await saveDraft(10, '删除后新增温度', 'REGRESSION.NEW.10');
+      const rows = page.locator('table tbody tr');
+      assert.equal(await page.locator('table thead th').first().innerText(), '序号');
+      assert.deepEqual(await rows.locator('td:first-child').allTextContents(), ['1', '2', '3', '4', '5', '6', '7', '8']);
+      assert.deepEqual((await fetch(base + '/api/tags').then(response => response.json())).map(tag => tag.id), [1, 2, 3, 4, 5, 6, 7, 10]);
+      await page.locator('.table-wrap').evaluate(element => { element.scrollLeft = 0; });
+      await page.evaluate(() => window.scrollTo(0, 0));
+      await capture('05-delete-and-add-continuous-rows', { fullPage: true });
+      await rows.filter({ hasText: '删除后新增温度' }).getByRole('button', { name: '编辑', exact: true }).click();
+      await pointDialog().getByRole('button', { name: '复制为新点位以更换地址', exact: true }).click();
+      await saveDraft(11, '删除后复制温度', 'REGRESSION.COPY.11');
+      assert.deepEqual(await rows.locator('td:first-child').allTextContents(), ['1', '2', '3', '4', '5', '6', '7', '8', '9']);
+      const catalog = await fetch(base + '/api/history/variables?source=simulation').then(response => response.json());
+      for (const id of [8, 9]) {
+        assert.ok(catalog.items.some(row => row.tag_id === id && row.name === `删除回归点${id}` && !row.active), 'Deleted history identity lost');
+      }
+      const search = page.getByRole('textbox', { name: '搜索点位', exact: true });
+      await search.fill('删除后新增温度');
+      assert.equal(await rows.count(), 1); assert.equal(await rows.locator('td').first().innerText(), '1');
+      await search.fill('');
+      await page.reload(); await selectPage(page, '点位管理');
+      assert.deepEqual(await rows.locator('td:first-child').allTextContents(), ['1', '2', '3', '4', '5', '6', '7', '8', '9']);
+      const pin = (await fs.readFile(path.join(root, 'data/operator_pin.txt'), 'utf8')).trim();
+      await page.getByLabel('本机管理口令', { exact: true }).fill(pin);
+    });
+    await step('06 mobile first viewport remains usable and has no document overflow', async () => {
       await selectPage(page, '设备总览');
       await page.setViewportSize({ width: 390, height: 844 });
       await page.evaluate(() => window.scrollTo(0, 0));
@@ -173,10 +232,10 @@ async function main() {
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       assert.ok(overflow <= 1, 'Unexpected horizontal page overflow: ' + overflow);
       assert.equal(await page.getByRole('button', { name: '退出软件', exact: true }).isVisible(), true);
-      await capture('05-mobile-overview');
+      await capture('06-mobile-overview');
       await page.setViewportSize({ width: 1440, height: 1080 });
     });
-    await step('06 header exit confirmation stops acquisition and the desktop process', async () => {
+    await step('07 header exit confirmation stops acquisition and the desktop process', async () => {
       await selectPage(page, 'PLC连接');
       assert.notEqual(await page.getByLabel('本机管理口令', { exact: true }).inputValue(), '');
       const shutdown = page.waitForResponse(response => new URL(response.url()).pathname === '/api/shutdown');
@@ -197,7 +256,7 @@ async function main() {
       await assert.rejects(fetch(base + '/api/health'), 'HTTP listener remains active after process exit');
       await assert.rejects(fs.access(path.join(root, 'data/gateway.pid')));
       await assert.rejects(fs.access(path.join(root, 'data/desktop-instance.json')));
-      await capture('06-ui-shutdown');
+      await capture('07-ui-shutdown');
     });
     assert.deepEqual(pageErrors, [], 'Unexpected browser JavaScript errors');
     assert.deepEqual(consoleErrors, [], 'Unexpected application console errors');

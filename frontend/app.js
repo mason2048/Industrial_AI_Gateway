@@ -45,7 +45,7 @@ createApp({
     const writeTag = ref(null), writePin = ref(''), writeValue = ref(''), writeProposal = ref(null), writeText = ref('');
     const connectionTest = ref(null), validation = ref(null), diagnostics = ref(null), readiness = ref(null);
     const shutdownRequested = ref(false);
-    const editFields = [{ key: 'id', label: 'ID', type: 'number', min: 1, step: 1, required: true, identity: true }, { key: 'name', label: '变量名称', required: true },
+    const editFields = [{ key: 'name', label: '变量名称', required: true },
       { key: 'address', label: 'PLC原始地址（用于识别）', required: true, identity: true }, { key: 'device', label: '设备', required: true, identity: true }, { key: 'unit', label: '单位' },
       { key: 'threshold', label: '变化保存阈值（绝对差值）', type: 'number', min: 0, required: true },
       { key: 'history_interval_seconds', label: '定时保存间隔（秒，留空继承全局）', type: 'number', min: 0.001, placeholder: '留空使用全局默认值' },
@@ -68,6 +68,7 @@ createApp({
     const matches = tag => `${tag.name} ${tag.address} ${tag.device} ${tag.id}`.toLowerCase().includes(search.value.toLowerCase());
     const filteredTags = computed(() => tags.value.filter(matches)), tagPages = computed(() => Math.max(1, Math.ceil(filteredTags.value.length / 50)));
     const pagedTags = computed(() => filteredTags.value.slice((tagPage.value - 1) * 50, tagPage.value * 50));
+    const tagRowNumber = index => (tagPage.value - 1) * 50 + index + 1;
     const filteredCurrent = computed(() => current.value.items.filter(matches));
     const currentPages = computed(() => Math.max(1, Math.ceil(filteredCurrent.value.length / 50)));
     const pagedCurrent = computed(() => filteredCurrent.value.slice((tagPage.value - 1) * 50, tagPage.value * 50));
@@ -178,25 +179,46 @@ createApp({
         importPreview.value = null; await loadTags(); message.value = `已导入 ${result.count} 个点位。`;
       }, true);
     }
-    function editTag(tag) {
+    async function editTag(tag) {
       editingOriginal.value = tag?.id || null; editingETag.value = tagETag.value;
-      editing.value = tag ? { history_interval_seconds: null, precision: 5, record_changes: true, ...tag } : { id: Math.max(0, ...tags.value.map(item => item.id)) + 1, address: '', name: '',
+      editing.value = tag ? { history_interval_seconds: null, precision: 5, record_changes: true, ...tag } : { id: null, address: '', name: '',
         device: devices.value[0] || '', type: 'FLOAT', unit: '-', permission: 'READ', ai_description: '', save: true, threshold: 0, node_id: '',
         history_interval_seconds: null, precision: 5, record_changes: false };
       modalError.value = '';
+      if (!tag) await allocateTagId();
     }
-    function copyTag() {
-      const draft = { ...editing.value, id: Math.max(0, ...tags.value.map(item => item.id)) + 1 };
+    async function copyTag() {
+      const draft = { ...editing.value, id: null };
       delete draft.revision;
       editingOriginal.value = null; editingETag.value = tagETag.value; editing.value = draft; modalError.value = '';
+      await allocateTagId();
+    }
+    async function allocateTagId() {
+      await action(async () => {
+        if (!editing.value || editingOriginal.value) return;
+        const draft = editing.value, etag = editingETag.value;
+        try {
+          if (!etag) throw new Error('尚未读取点位表版本，请载入最新版本后重新添加。');
+          const result = await api.requestResult('/api/tags/next-id', { channel: 'tag-next-id' });
+          if (result.etag !== etag) throw new Error('点位表已被其他页面修改，请载入最新版本后重新添加。');
+          if (!Number.isSafeInteger(result.data.next_id) || result.data.next_id < 1) throw new Error('后台未返回有效的新点位ID，请重试。');
+          draft.id = result.data.next_id;
+        } catch (failure) {
+          if (failure.name === 'AbortError') throw failure;
+          throw new Error(`获取新点位ID失败：${failure.message} 草稿已保留。`);
+        }
+      }, true);
     }
     async function reloadEditing() {
       await action(async () => { await loadTags(); const tag = tags.value.find(item => item.id === editingOriginal.value);
         if (editingOriginal.value && !tag) throw new Error('该点位已被删除，请关闭草稿后重新添加。');
-        editTag(tag); }, true);
+        await editTag(tag); }, true);
     }
     async function saveTag() {
       await action(async () => {
+        if (!Number.isSafeInteger(Number(editing.value?.id)) || Number(editing.value?.id) < 1) {
+          throw new Error('尚未获取新点位ID，请点击“重新获取ID”后再保存。草稿已保留。');
+        }
         const tag = { ...editing.value, id: Number(editing.value.id), threshold: Number(editing.value.threshold), precision: Number(editing.value.precision),
           history_interval_seconds: editing.value.history_interval_seconds === '' || editing.value.history_interval_seconds == null
             ? null : Number(editing.value.history_interval_seconds) };
@@ -299,8 +321,8 @@ createApp({
       historyData, historySeries, historySeriesGroups, historySelection, historyForm, historyDevices, historyVariables, historyLoading, historyError,
       aiForm, aiResult, aiStatus, editing, editingOriginal, modalError, importPreview, writeTag, writePin, writeValue, writeProposal, writeText,
       connectionTest, validation, diagnostics, readiness, editFields, pageTitle, pageDescription, devices, keySensors, filteredTags, pagedTags,
-      tagPages, pagedCurrent, currentPages, canWrite, fmt, localTime, variableKey: IAGHistory.variableKey, variableLabel,
-      navigate, refresh, saveConnection, reloadConnection, testConnection, validateTags, importTags, applyImport, editTag, copyTag, reloadEditing, saveTag, removeTag,
+      tagPages, tagRowNumber, pagedCurrent, currentPages, canWrite, fmt, localTime, variableKey: IAGHistory.variableKey, variableLabel,
+      navigate, refresh, saveConnection, reloadConnection, testConnection, validateTags, importTags, applyImport, editTag, copyTag, allocateTagId, reloadEditing, saveTag, removeTag,
       shutdownGateway, shutdownRequested,
       refreshHistoryCatalog, submitHistory, pageHistory, askAI, getStatus, loadDiagnostics, openWrite, closeWrite, proposeWrite, confirmWrite };
   }

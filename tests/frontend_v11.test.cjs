@@ -158,6 +158,122 @@ test('connection editing keeps its original ETag when unrelated refresh gets a n
   assert.equal(state.connection.value.endpoint, 'opc.tcp://newhost:4840');
 });
 
+test('new and copied tags obtain unused permanent IDs after deleting IDs 8 and 9', async () => {
+  const active = Array.from({ length: 7 }, (_, index) => ({ id: index + 1, name: `Tag ${index + 1}`, device: 'D', address: `M${index}.0` }));
+  let allocations = 0;
+  const { state } = appFixture(async url => {
+    if (url === '/api/tags') return response(active, 200, '"tags-12"');
+    if (url === '/api/config') return response({ mode: 'simulation' });
+    if (url === '/api/tags/next-id') { allocations++; return response({ next_id: 10 }, 200, '"tags-12"'); }
+    throw new Error('Unexpected call ' + url);
+  });
+  await state.refresh();
+  await state.editTag();
+  assert.equal(state.editing.value.id, 10);
+  assert.equal(allocations, 1);
+  await state.editTag(active[6]);
+  state.editing.value.name = 'Copied draft';
+  await state.copyTag();
+  assert.equal(state.editing.value.id, 10);
+  assert.equal(state.editing.value.name, 'Copied draft');
+  assert.equal(state.editingOriginal.value, null);
+  assert.equal(allocations, 2);
+});
+
+test('failed ID allocation retains a new draft, blocks saving, and can be retried', async () => {
+  const allocation = deferred(); let allocations = 0, mutations = 0;
+  const { state } = appFixture(async (url, options) => {
+    if (url === '/api/config') return response({ mode: 'simulation' });
+    if (url === '/api/tags') { if (options.method === 'PUT') mutations++; return response([], 200, '"tags-2"'); }
+    if (url === '/api/tags/next-id') return ++allocations === 1 ? allocation.promise : response({ next_id: 10 }, 200, '"tags-2"');
+    throw new Error('Unexpected call ' + url);
+  });
+  state.managerPin.value = 'operator'; await state.refresh();
+  const opened = state.editTag();
+  Object.assign(state.editing.value, { name: 'Vacuum draft', address: 'VD200', device: 'Pump', threshold: 0.00005 });
+  allocation.resolve(response({ detail: 'service unavailable' }, 503)); await opened;
+  assert.equal(state.editing.value.id, null);
+  assert.equal(state.editing.value.name, 'Vacuum draft');
+  assert.match(state.modalError.value, /获取新点位ID失败.*草稿已保留/);
+  await state.saveTag();
+  assert.equal(mutations, 0); assert.match(state.modalError.value, /重新获取ID/);
+  await state.allocateTagId();
+  assert.equal(state.editing.value.id, 10); assert.equal(state.editing.value.address, 'VD200');
+  assert.equal(state.editing.value.threshold, 0.00005); assert.equal(state.modalError.value, '');
+  assert.equal(state.editFields.some(field => field.key === 'id'), false);
+});
+
+test('failed ID allocation while copying preserves edited fields without reusing the original ID', async () => {
+  const original = { id: 7, name: 'Old vacuum', address: 'VD100', node_id: 'ns=2;s=Old', device: 'Pump', revision: 3 };
+  const { state } = appFixture(async url => {
+    if (url === '/api/config') return response({ mode: 'simulation' });
+    if (url === '/api/tags') return response([original]);
+    if (url === '/api/tags/next-id') return response({ detail: 'offline' }, 503);
+    throw new Error('Unexpected call ' + url);
+  });
+  await state.refresh(); await state.editTag(original);
+  Object.assign(state.editing.value, { name: 'New vacuum draft', address: 'VD200', node_id: 'ns=2;s=New' });
+  await state.copyTag();
+  assert.equal(state.editing.value.id, null); assert.equal(state.editingOriginal.value, null);
+  assert.equal(state.editing.value.revision, undefined); assert.equal(state.editing.value.name, 'New vacuum draft');
+  assert.equal(state.editing.value.node_id, 'ns=2;s=New');
+  assert.equal(state.tags.value[0].name, 'Old vacuum'); assert.match(state.modalError.value, /草稿已保留/);
+});
+
+test('ID allocation rejects invalid IDs and missing or changed point-table versions', async () => {
+  for (const [nextId, etag] of [[0, '"tags-1"'], [8.5, '"tags-1"'], ['10', '"tags-1"'], [10, null], [10, '"tags-2"']]) {
+    const { state } = appFixture(async url => {
+      if (url === '/api/config') return response({ mode: 'simulation' });
+      if (url === '/api/tags') return response([{ id: 7, name: 'Pump', device: 'D' }], 200, '"tags-1"');
+      if (url === '/api/tags/next-id') return response({ next_id: nextId }, 200, etag);
+      throw new Error('Unexpected call ' + url);
+    });
+    await state.refresh(); await state.editTag();
+    assert.equal(state.editing.value.id, null); assert.match(state.modalError.value, /获取新点位ID失败/);
+  }
+});
+
+test('a refreshed table cannot silently replace the version used to allocate a draft ID', async () => {
+  let version = '"tags-1"'; const calls = [];
+  const { state } = appFixture(async (url, options) => {
+    calls.push({ url, options });
+    if (url === '/api/config') return response({ mode: 'simulation' });
+    if (url === '/api/tags/next-id') return response({ next_id: 10 }, 200, version);
+    if (url === '/api/tags') {
+      if (options.method === 'PUT') return response({ detail: 'stale' }, 412);
+      return response([{ id: 7, name: 'Pump', device: 'D' }], 200, version);
+    }
+    throw new Error('Unexpected call ' + url);
+  });
+  state.managerPin.value = 'operator'; await state.refresh(); await state.editTag();
+  Object.assign(state.editing.value, { name: 'Draft', address: 'M1.0' });
+  version = '"tags-2"'; await state.refresh(); await state.saveTag();
+  const applied = calls.find(call => call.options.method === 'PUT');
+  assert.equal(applied.options.headers['If-Match'], '"tags-1"');
+  assert.equal(applied.options.headers['X-Operator-Pin'], 'operator');
+  assert.equal(state.editing.value.id, 10); assert.equal(state.editing.value.name, 'Draft');
+  assert.match(state.modalError.value, /其他页面/);
+});
+
+test('row numbers stay continuous independently of permanent IDs, pages, and filters', async () => {
+  const { state, Vue } = appFixture(async () => response([]));
+  state.tags.value = [1, 2, 3, 4, 5, 6, 7, 10].map(id => ({ id, name: `Tag ${id}`, device: 'D', address: `D${id}` }));
+  assert.equal(state.pagedTags.value.at(-1).id, 10);
+  assert.equal(state.tagRowNumber(7), 8);
+  state.tags.value = Array.from({ length: 120 }, (_, index) => ({ id: index * 2 + 1,
+    name: index < 64 ? 'Filtered pump' : 'Other valve', device: 'D', address: `D${index}` }));
+  state.tagPage.value = 2;
+  assert.equal(state.pagedTags.value[0].id, 101); assert.equal(state.tagRowNumber(0), 51);
+  assert.equal(state.tagRowNumber(49), 100);
+  state.search.value = 'Filtered pump'; await Vue.nextTick();
+  assert.equal(state.tagPage.value, 1); assert.equal(state.filteredTags.value.length, 64);
+  assert.equal(state.tagRowNumber(0), 1);
+  state.tagPage.value = 2;
+  assert.equal(state.pagedTags.value.length, 14); assert.equal(state.tagRowNumber(13), 64);
+  state.search.value = 'Other valve'; await Vue.nextTick();
+  assert.equal(state.pagedTags.value[0].id, 129); assert.equal(state.tagRowNumber(0), 1);
+});
+
 test('overview queries the current connection and revision rather than legacy history', async () => {
   const calls = [];
   const { state, Vue, chart } = appFixture(async url => {
@@ -185,5 +301,9 @@ test('Vue templates compile without errors and BOOL confirmation freezes its tar
   context.Vue.compile(template, { decodeEntities: value => value, onError: error => errors.push(error.message) });
   assert.deepEqual(errors, []);
   assert.match(html, /v-if="writeTag.type==='BOOL'"[^>]*:disabled="!!writeProposal"/);
+  assert.match(html, /<th[^>]*>序号<\/th>/);
+  assert.match(html, /v-for="\(tag,index\) in pagedTags"/);
+  assert.match(html, /\{\{tagRowNumber\(index\)\}\}/);
+  assert.match(html, /readonly aria-label="点位ID（自动分配）"/);
   for (const file of ['api-client.js', 'realtime.js', 'history.js', 'app.js']) new vm.Script(fs.readFileSync(path.join(root, 'frontend', file), 'utf8'), { filename: file });
 });

@@ -128,6 +128,20 @@ class Database:
         with self.connect() as db:
             return int(db.execute("SELECT value FROM gateway_meta WHERE key='tags_revision'").fetchone()[0])
 
+    def next_tag_id(self):
+        """Read an unused permanent ID and its point-table revision without reserving it."""
+        with self.connect() as db:
+            db.execute("PRAGMA query_only=ON")
+            # One read transaction keeps the high-water ID and revision in the
+            # same snapshot. Retired identities remain registered after cleanup.
+            db.execute("BEGIN")
+            highest = db.execute("SELECT COALESCE(MAX(tag_id), 0) FROM tag_identity").fetchone()[0]
+            revision = int(db.execute("SELECT value FROM gateway_meta WHERE key='tags_revision'").fetchone()[0])
+            next_id = highest + 1
+            if next_id > 2147483647:
+                raise ValueError("点位ID已达到支持的最大值，无法自动分配新ID")
+            return next_id, revision
+
     def validate_replacement(self, tags):
         """Validate all permanent identities, including retired IDs, without writing."""
         seen_ids = set()

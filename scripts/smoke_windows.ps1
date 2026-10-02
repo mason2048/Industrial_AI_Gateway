@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
-    [string]$ExpectedVersion = "1.2.0",
+    [string]$ExpectedVersion = "1.2.1",
     [string]$Report = "dist/windows/WINDOWS_SMOKE_REPORT.json"
 )
 
