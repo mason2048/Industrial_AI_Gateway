@@ -140,3 +140,47 @@ test('desktop exit requires a PIN and clears polling and credentials after a sto
   assert.equal(state.current.value.state, 'stopping');
   assert.equal(state.managerPin.value, '');
 });
+
+test('clearing saved PLC credentials is explicit and consistent in candidate tests and saving', async () => {
+  const calls = [];
+  const state = appFixture(async (url, options) => {
+    calls.push({ url, options });
+    if (url === '/api/config') return response({ mode: 'opcua', endpoint: 'opc.tcp://localhost:4840',
+      poll_interval: 1, batch_size: 100, heartbeat_seconds: 1800, retention_days: 7 });
+    if (url === '/api/tags') return response([]);
+    if (url === '/api/connection/test') return response({ success: true, message: '候选可连接' });
+    if (url === '/api/connection') return response({ message: '已应用' });
+    throw new Error('Unexpected request: ' + url);
+  });
+  state.managerPin.value = 'operator'; await state.refresh(); await state.navigate('connection');
+  await state.testConnection();
+  const unchanged = JSON.parse(calls.find(call => call.url === '/api/connection/test').options.body);
+  assert.equal(Object.hasOwn(unchanged, 'username'), false); assert.equal(Object.hasOwn(unchanged, 'security_string'), false);
+  state.connection.value.username = 'draft-user'; state.connection.value.security_string = 'draft-security';
+  state.connection.value.clear_username = true; state.connection.value.clear_security_string = true;
+  await state.testConnection(); await state.saveConnection();
+  const candidate = JSON.parse(calls.filter(call => call.url === '/api/connection/test').at(-1).options.body);
+  const saved = JSON.parse(calls.find(call => call.url === '/api/connection').options.body);
+  assert.equal(candidate.username, ''); assert.equal(candidate.security_string, '');
+  assert.deepEqual(saved, candidate);
+  assert.equal(Object.hasOwn(saved, 'clear_username'), false);
+});
+
+test('an empty point table can allocate a new point and accept a first device', async () => {
+  let written;
+  const state = appFixture(async (url, options) => {
+    if (url === '/api/config') return response({ mode: 'simulation' });
+    if (url === '/api/tags/next-id') return response({ next_id: 11 });
+    if (url === '/api/tags') {
+      if (options.method === 'PUT') written = JSON.parse(options.body);
+      return response([]);
+    }
+    throw new Error('Unexpected request: ' + url);
+  });
+  state.managerPin.value = 'operator'; await state.refresh(); await state.editTag();
+  assert.equal(state.devices.value.length, 0); assert.equal(state.editing.value.device, '');
+  Object.assign(state.editing.value, { name: '首个点位', device: '新设备', address: 'M0.0' });
+  await state.saveTag();
+  assert.equal(written.length, 1); assert.equal(written[0].device, '新设备'); assert.equal(written[0].id, 11);
+  assert.equal(state.tagRowNumber(0), 1);
+});

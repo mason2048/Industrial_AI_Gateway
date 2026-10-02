@@ -18,6 +18,7 @@ from .ai_api import LocalDataProvider, router as ai_router
 from .configuration import ConfigStore
 from .database import Database
 from .history import History
+from .llm import AIConfigStore, ModelService
 from .observability import Operations, Redactor, configure_logging
 from .opcua_client import Gateway
 from .routes import make_router
@@ -37,7 +38,7 @@ def create_app(root=ROOT):
                 raise RuntimeError("该目录已有运行中的应用或仍在完成停机")
         config = ConfigStore(root)
         db = Database(root / "data/history.db")
-        if not db.tags() and (root / "data/tags.xlsx").exists():
+        if not db.tags() and db.tags_revision() == 0 and (root / "data/tags.xlsx").exists():
             db.replace_tags(import_excel((root / "data/tags.xlsx").read_bytes()))
         values = config.snapshot()
         history = History(db, values["heartbeat_seconds"], values["retention_days"])
@@ -51,6 +52,8 @@ def create_app(root=ROOT):
         if not operator_pin:
             raise ValueError("管理口令文件为空，请修复data/operator_pin.txt后启动")
         redactor = Redactor([operator_pin, values["username"], os.environ.get(values["password_env"], "")])
+        ai_config = AIConfigStore(root)
+        redactor.update([*redactor.secrets, ai_config.snapshot()[1]])
         logger, log_handler = configure_logging(root, redactor)
         operations = Operations(root, gateway, db, config, redactor, logger)
         with db.connect() as conn:
@@ -120,7 +123,7 @@ def create_app(root=ROOT):
 
     app = FastAPI(title="Industrial AI Gateway", version=APP_VERSION, lifespan=lifespan)
     state = SimpleNamespace(root=root, gateway=gateway, db=db, history=history, config_store=config,
-                            operator_pin=operator_pin, redactor=redactor, operations=operations)
+                            operator_pin=operator_pin, redactor=redactor, operations=operations, ai_config_store=ai_config)
 
     def refresh_redaction():
         now = config.snapshot()
@@ -163,6 +166,8 @@ def create_app(root=ROOT):
     app.include_router(make_router(state))
     provider = LocalDataProvider(lambda device=None: redactor.clean(gateway.snapshot(device)), history.query,
                                  db.tag_definition)
-    app.include_router(ai_router(provider))
+    model_service = ModelService(ai_config, provider, redactor)
+    app.state.model_service = model_service
+    app.include_router(ai_router(provider, model_service, state))
     app.mount("/", StaticFiles(directory=root / "frontend", html=True), name="frontend")
     return app

@@ -128,10 +128,16 @@ def test_end_to_end_api_permissions_and_replay(app_root):
         assert c.get('/api/tags').json()==before
         exported=c.get('/api/tags/export')
         assert len(import_excel(exported.content))==6
-        assert c.put('/api/tags',json=[],headers=headers).status_code==400
+        assert c.post('/api/operator/write-request',json={'tag_id':1,'value':2},headers=headers).status_code==403
+        cleared=c.put('/api/tags',json=[],headers=headers)
+        assert cleared.status_code==200,cleared.text
+        assert c.get('/api/tags').json()==[]
+        headers['If-Match']=cleared.headers['ETag']
+        # Retired identities can be restored with the same address and type;
+        # clearing the table neither grants writes nor reuses their IDs.
         assert c.post('/api/connection',json={'mode':'opcua','endpoint':'http://x'}).status_code==422
         assert c.post('/api/operator/write-request',json={'tag_id':1,'value':2}).status_code==403
-        assert c.post('/api/operator/write-request',json={'tag_id':1,'value':2},headers=headers).status_code==403
+        assert c.post('/api/operator/write-request',json={'tag_id':1,'value':2},headers=headers).status_code==404
         before[0]['permission']='WRITE'
         assert c.put('/api/tags',json=before,headers=headers).status_code==200
         proposal=c.post('/api/operator/write-request',json={'tag_id':1,'value':0.00009},headers=headers).json()

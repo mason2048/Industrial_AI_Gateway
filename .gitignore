@@ -22,6 +22,7 @@ gateway-data/
 runtime/
 config/config.json
 config/config.default.json
+config/ai.json
 data/*
 !data/.gitkeep
 .env

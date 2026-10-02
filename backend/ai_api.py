@@ -1,7 +1,7 @@
 """On-demand, read-only process data for local questions and future AI adapters."""
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from typing import Literal
 from .models import AIQuery, threshold_crossed
 
@@ -16,25 +16,29 @@ class LocalDataProvider:
         self.history = query_history
         self.definition = definition
 
-    def history_data(self, *, changed_only=False, **filters):
+    def history_data(self, *, changed_only=False, scan_limit=None, **filters):
         """Filter an ordered range before pagination, retaining each series' baseline."""
         if not changed_only:
             return self.history(**filters)
         limit = filters.pop("limit", 2000)
         offset = filters.pop("offset", 0)
-        page_size = min(10000, self.HISTORY_SCAN_LIMIT)
+        scan_limit = min(scan_limit or self.HISTORY_SCAN_LIMIT, self.HISTORY_SCAN_LIMIT)
+        page_size = min(10000, scan_limit)
         first = self.history(**filters, limit=page_size, offset=0)
         # Freeze the default time window so each read uses the same boundaries.
         filters.update(start=first["start"], end=first["end"])
-        total = first["total"]
+        if "snapshot_max_id" in first:
+            filters["snapshot_max_id"] = first["snapshot_max_id"]
+        initial_total = total = first["total"]
+        concurrent_change = False
         current = self.current()
         definitions = {(t["id"], t.get("revision", 1)): t for t in current["items"]}
         baselines, unknown, selected = {}, set(), []
         scanned, kept = 0, 0
         batch = first["items"]
-        while batch and scanned < self.HISTORY_SCAN_LIMIT:
+        while batch and scanned < scan_limit:
             for raw in batch:
-                if scanned >= self.HISTORY_SCAN_LIMIT:
+                if scanned >= scan_limit:
                     break
                 scanned += 1
                 key = (raw["tag_id"], raw.get("source"), raw.get("connection_id"), raw.get("tag_revision", 1))
@@ -69,23 +73,27 @@ class LocalDataProvider:
                     if offset <= kept < offset + limit:
                         selected.append(row)
                     kept += 1
-            if scanned >= total or scanned >= self.HISTORY_SCAN_LIMIT:
+            if scanned >= total or scanned >= scan_limit:
                 break
             next_page = self.history(**filters, limit=page_size, offset=scanned)
             batch = next_page["items"]
+            if next_page["total"] != initial_total:
+                concurrent_change = True
             total = max(total, next_page["total"])
-        truncated = scanned < total
+        truncated = scanned < total or concurrent_change
         has_more = offset + len(selected) < kept
         note = first.get("note", "") + " 变化数据按每个点位及定义版本的阈值比较上次保留基准；包含区间首样本、BOOL翻转和质量变化。"
         if truncated:
             note += f" 仅检查前{scanned}条原始记录，结果不完整；请缩短时间范围或选择单个变量。"
+        if concurrent_change:
+            note += " 查询期间历史记录发生变化，分页结果可能不完整；请重新查询。"
         if unknown:
             note += " 部分历史定义不可用，其记录全部保留。"
         return {**first, "items": selected, "total": kept, "limit": limit, "offset": offset,
                 "has_more": has_more, "next_offset": offset + len(selected) if has_more else None,
                 "changed_only": True, "truncated": truncated, "note": note,
                 "filter": {"raw_total": total, "scanned": scanned, "filtered_total": kept,
-                           "complete": not truncated, "scan_limit": self.HISTORY_SCAN_LIMIT,
+                           "complete": not truncated, "scan_limit": scan_limit, "concurrent_change": concurrent_change,
                            "unknown_definitions": [{"tag_id": tag_id, "tag_revision": revision}
                                                    for tag_id, revision in sorted(unknown)]},
                 "summary_scope": "all_saved_samples_in_range"}
@@ -125,7 +133,7 @@ class LocalDataProvider:
                 "explanation":"只评估采集质量。尚未配置设备工况和诊断阈值，不将通讯正常等同于设备健康。",
                 "plc_write_allowed":False}
 
-    def analyze(self, request):
+    def selection(self, request):
         current = self.current(request.device)
         variable = request.variable
         candidates = [x for x in current["items"] if x["name"] in request.question]
@@ -136,13 +144,7 @@ class LocalDataProvider:
                           ("今天", "昨天", "历史", "过去", "最近", "一周", "7天", "七天", "趋势")))
         realtime = not historical and any(k in request.question for k in ("当前", "实时", "现在", "此刻", "最新"))
         matches = [x for x in current["items"] if x["name"] == variable]
-        if realtime or (not historical and matches and all(not x.get("save", True) for x in matches)):
-            if request.connection_id and request.connection_id != current.get("connection_id"):
-                return {"provider": "local_rules", "answer": "所选连接不是当前连接，请查询该连接的历史数据。",
-                        "plc_write_allowed": False}
-            return self._current_answer(current, variable)
-        if not variable:
-            return {"provider":"local_rules","answer":"请选择变量，或在问题中输入完整变量名称。支持当前值、今天、昨天、最近一周及所选时间范围。","plc_write_allowed":False}
+        query_type = "current" if realtime or (not historical and matches and all(not x.get("save", True) for x in matches)) else "history"
         start, end = request.start, request.end
         if not start and not end:
             now = datetime.now(ZoneInfo("Asia/Shanghai"))
@@ -152,6 +154,20 @@ class LocalDataProvider:
             elif any(k in request.question for k in ("一周", "7天", "七天")):
                 start,end = (now-timedelta(days=7)).isoformat(),now.isoformat()
         connection_id = request.connection_id or current.get("connection_id")
+        return {"current": current, "variable": variable, "query_type": query_type,
+                "start": start, "end": end, "connection_id": connection_id}
+
+    def analyze(self, request):
+        selected = self.selection(request)
+        current, variable = selected["current"], selected["variable"]
+        if selected["query_type"] == "current":
+            if request.connection_id and request.connection_id != current.get("connection_id"):
+                return {"provider": "local_rules", "answer": "所选连接不是当前连接，请查询该连接的历史数据。",
+                        "plc_write_allowed": False}
+            return self._current_answer(current, variable)
+        if not variable:
+            return {"provider":"local_rules","answer":"请选择变量，或在问题中输入完整变量名称。支持当前值、今天、昨天、最近一周及所选时间范围。","plc_write_allowed":False}
+        start, end, connection_id = selected["start"], selected["end"], selected["connection_id"]
         data = self.history(device=request.device, variable=variable,start=start,end=end,source=current["mode"],limit=2000,
                             connection_id=connection_id, tag_revision=request.tag_revision)
         summaries = [s for s in data["summary"] if s["good_samples"]]
@@ -164,8 +180,48 @@ class LocalDataProvider:
                 "evidence_count":data["total"],"note":data["note"],"plc_write_allowed":False}
 
 
-def router(provider):
+def router(provider, model_service=None, state=None):
     api = APIRouter(prefix="/api/ai",tags=["AI只读数据服务"])
+
+    if model_service is not None:
+        from .llm import AIConfigRequest, AIConflict, ModelError
+        from .routes import etag, expected_revision
+        import secrets
+
+        def require_admin(request):
+            supplied = request.headers.get("X-Operator-Pin", "").encode("utf-8")
+            if not secrets.compare_digest(supplied, state.operator_pin.encode("utf-8")):
+                raise HTTPException(403, "模型管理及推理操作需要本机data/operator_pin.txt中的口令")
+
+        def invoke(operation):
+            try:
+                return operation()
+            except ModelError as exc:
+                raise HTTPException(exc.status_code, str(exc)) from exc
+
+        @api.get("/config")
+        def get_ai_config(response: Response):
+            values = model_service.store.public()
+            response.headers["ETag"] = etag("ai", values["revision"])
+            return values
+
+        @api.post("/config")
+        def set_ai_config(body: AIConfigRequest, request: Request, response: Response):
+            require_admin(request)
+            expected = expected_revision(request, "ai")
+            try:
+                values = model_service.store.update(body, expected)
+            except AIConflict as exc:
+                raise HTTPException(412, str(exc)) from exc
+            model_service._remember_key(model_service.store.snapshot()[1])
+            state.operations.record("ai_configuration_changed", {"provider": values["provider"], "revision": values["revision"]})
+            response.headers["ETag"] = etag("ai", values["revision"])
+            return values
+
+        @api.post("/test")
+        def test_ai_config(body: AIConfigRequest, request: Request):
+            require_admin(request)
+            return invoke(lambda: model_service.test(body))
 
     @api.get("/current")
     def current(device: str | None = None): return provider.current(device)
@@ -188,6 +244,14 @@ def router(provider):
     def status(device: str | None=None): return provider.status(device)
 
     @api.post("/query")
-    def query(request: AIQuery): return provider.analyze(request)
+    def query(body: AIQuery, request: Request):
+        if model_service is None:
+            return provider.analyze(body)
+        selected_config = model_service.store.snapshot()
+        if selected_config[0].provider != "local_rules":
+            require_admin(request)
+            if expected_revision(request, "ai") != selected_config[0].revision:
+                raise HTTPException(412, "模型配置已变化，请重新加载并确认模型服务后提问")
+        return invoke(lambda: model_service.analyze(body, config_snapshot=selected_config))
 
     return api

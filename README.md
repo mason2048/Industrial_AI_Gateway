@@ -2,7 +2,7 @@
 
 本地工业数据网关，通过 OPC UA 读取 PLC 数据，提供实时监控、SQLite 历史、Excel 点位管理和按需数据查询。Windows 免安装版自带运行环境，双击 EXE 后在本机浏览器打开操作界面。
 
-[下载 Windows 版](https://github.com/mason2048/Industrial_AI_Gateway/releases/latest) · [Windows 使用说明](docs/WINDOWS_DEPLOYMENT.md) · [源码运行说明](docs/SOURCE_DEPLOYMENT.md)
+[下载 Windows 版](https://github.com/mason2048/Industrial_AI_Gateway/releases/latest) · [Windows 使用说明](docs/WINDOWS_DEPLOYMENT.md) · [模型配置说明](docs/MODEL_SETUP.md) · [源码运行说明](docs/SOURCE_DEPLOYMENT.md)
 
 ## Windows 快速开始
 
@@ -28,6 +28,7 @@
 | 小数精度 | 每点可设置 0–10 位显示小数，默认 5 位；数据库保留采集值 |
 | Excel | **点位管理**：空模板、整表导入预检/确认、导出当前点表，保留固定点位 ID、AI 注释和历史策略 |
 | 按需查询 | **按需数据查询**：用户提出问题后查询当前/已存数据，平时不进行 AI 分析 |
+| 模型接入 | **模型设置**：Ollama、LM Studio / OpenAI兼容接口，配置地址、模型名、Key、超时和输出上限；默认离线规则 |
 | 本地诊断 | **运行诊断**：采集、存储、缓冲、磁盘、备份和历史缺口 |
 
 OPC UA 服务器地址与 PLC 程序的心跳握手点位是两个不同概念。本版可设置通信端点与读取方式，尚未实现自动写入 PLC 心跳握手或 OPC UA 订阅切换。使用 KEPServerEX 时，PLC 驱动与原始地址映射在 KEPServerEX 维护，本软件读取其发布的 NodeId。
@@ -36,7 +37,7 @@ OPC UA 服务器地址与 PLC 程序的心跳握手点位是两个不同概念�
 
 AI 数据接口仅在请求时返回数据，`GET /api/ai/history` 默认按阈值筛选，并保留区间首样本、BOOL 翻转及质量变化；`changed_only=false` 返回原始保存记录。筛选附分页和完整性说明，扫描超过 50 万条原始记录会标记不完整。当前数据从最近轮询快照返回；断线或过期不会视为有效当前值。
 
-当前“AI”功能是本地规则查询和统计，**尚未连接大语言模型，也不会自动上传云端**。设备健康状态为 `unknown`。真实 PLC 的 NodeId、账号、证书和 1000 点现场读取性能需在实际设备上确认。
+默认“AI”使用离线本地规则查询和统计。1.3.0 起可在 **模型设置** 接入本地或远程文本聊天模型，先测试再保存，用户提问时才发送有限证据；模型没有 PLC 写入或命令执行权限。Ollama 每次请求完成后请求卸载模型，其他服务的驻留由运行器管理。模型软件和权重需另行安装，建议先试 Qwen3 4B / 8B，详见 [配置说明](docs/MODEL_SETUP.md)。设备健康状态仍为 unknown；模型解释与真实 PLC 性能需现场评价。
 
 ## 使用流程
 
@@ -65,7 +66,7 @@ AI 数据接口仅在请求时返回数据，`GET /api/ai/history` 默认按阈�
 
 ### 点表字段
 
-保留旧版中文 Excel 字段：ID、地址、名称、类型、单位、权限、AI描述、保存、阈值；设备、NodeId、保存间隔秒、小数位数、记录变化为可选列。最多 1000 点、5 MB 文件，整表导入失败保持原表。新模板“记录变化”留空按NO处理；没有此列的旧模板保持原来的变化保存行为。
+保留旧版中文 Excel 字段：ID、地址、名称、类型、单位、权限、AI描述、保存、阈值；设备、NodeId、保存间隔秒、小数位数、记录变化为可选列。支持 0–1000 点、5 MB 文件，整表导入失败保持原表；允许清空点表，重启不恢复已删除点。新模板“记录变化”留空按NO处理；没有此列的旧模板保持原来的变化保存行为。
 
 - 页面首列“序号”仅表示当前列表顺序，删除后会连续排列；变量下方的“点位 ID”是 Excel 和历史关联的固定标识，两者不同。例如删除 ID 8、9 后新增点位可获得 ID 10，但页面序号仍为 1、2、3……连续显示。
 - ID 永久绑定设备、地址、类型和 NodeId，历史清理后也不可复用为其他变量。页面新增和“复制为新点位”自动选择安全的新 ID，已有点位 ID 不随删除、排序或显示序号变化。
@@ -116,7 +117,9 @@ SQLite 继续使用 WAL、外键和事务。保留时长可以修改，是否更
 | GET /api/history/series | 单点全时段分桶曲线，默认 500 桶，最多 2000 |
 | GET /api/history/variables | 包含退役/改名定义的历史目录 |
 | GET /api/ai/current、history、status | AI 只读数据接口 |
-| POST /api/ai/query | 本地规则统计，默认当前连接 |
+| GET、POST /api/ai/config | 读取/修改模型设置，修改需管理口令和模型 ETag |
+| POST /api/ai/test | 仅测试候选模型，需口令，不保存、不发工业数据 |
+| POST /api/ai/query | 本地规则或配置的模型；模型需口令和 If-Match，默认当前连接 |
 | POST /api/shutdown | 本机管理口令授权后正常退出 |
 | POST /api/operator/write-request、write-confirm | 仅显式模拟测试，不允许真实 PLC 写入 |
 
@@ -159,14 +162,14 @@ Windows 管理员终端：
 ```sh
 python3.12 -m scripts.bootstrap init
 .venv/bin/python -m pytest -q --disable-warnings tests
-node --test tests/frontend_v11.test.cjs
+node --test tests/frontend_v11.test.cjs tests/frontend_basic.test.cjs tests/frontend_model.test.cjs
 ```
 
 Node 仅用于前端开发测试，不是运行依赖。浏览器端到端测试使用可选 Playwright，见 `tests/browser_v11.cjs`；生产安装没有 npm 步骤。
 
 测试使用临时安装目录、本机 OPC UA 服务器和故障注入，不操作正式数据或实体 PLC。自动化结果、已知边界和现场验收清单见 [TEST_REPORT.md](TEST_REPORT.md)，已实现任务与后续路线见 [docs/DEVELOPMENT_PLAN.md](docs/DEVELOPMENT_PLAN.md)。
 
-节点浏览、工程量转换、外部大模型、设备诊断、多 PLC、局域网身份授权和真实 PLC 控制属于后续范围。
+节点浏览、工程量转换、设备诊断、多 PLC、局域网身份授权和真实 PLC 控制属于后续范围。模型接入为有限数据证据的按需问答，尚未提供知识库、多轮记忆或自动工具调用。
 
 ## 构建与许可证
 

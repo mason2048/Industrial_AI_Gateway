@@ -113,11 +113,22 @@ class History:
         return " AND ".join(where), params
 
     def query(self, device=None, variable=None, tag_id=None, start=None, end=None,
-              source=None, limit=2000, offset=0, connection_id=None, tag_revision=None):
+              source=None, limit=2000, offset=0, connection_id=None, tag_revision=None,
+              snapshot_max_id=None):
+        if snapshot_max_id is not None and (isinstance(snapshot_max_id, bool)
+                                            or not isinstance(snapshot_max_id, int)
+                                            or snapshot_max_id < 0):
+            raise ValueError("历史快照记录上界必须为非负整数")
         begin, stop = time_range(start, end)
         clause, params = self._where(begin, stop, device, variable, tag_id, source, connection_id, tag_revision)
         with self.db.connect() as conn:
             conn.execute("BEGIN")  # Count, page and summary share one WAL read snapshot.
+            if snapshot_max_id is None:
+                snapshot_max_id = conn.execute("SELECT COALESCE(MAX(id),0) FROM history_data").fetchone()[0]
+            # Follow-up pages use this same insertion boundary. Delayed writer
+            # commits with earlier timestamps cannot shift their OFFSET rows.
+            clause += " AND history_data.id<=?"
+            params.append(snapshot_max_id)
             total = conn.execute(f"SELECT COUNT(*) FROM history_data WHERE {clause}", params).fetchone()[0]
             rows = [dict(x) for x in conn.execute(
                 f"""SELECT history_data.*,
@@ -139,7 +150,7 @@ class History:
             if row["data_type"] == "BOOL" and row["value"] is not None:
                 row["value"] = bool(row["value"])
         return dict(items=rows, total=total, limit=limit, offset=offset, has_more=offset+len(rows)<total,
-                    start=iso(begin), end=iso(stop), summary=summary,
+                    start=iso(begin), end=iso(stop), summary=summary, snapshot_max_id=snapshot_max_id,
                     note="统计基于全范围已保存样本；变化触发采样的均值不是时间加权均值。")
 
     def variables(self, device=None, source=None):

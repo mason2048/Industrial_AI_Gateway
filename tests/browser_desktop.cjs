@@ -7,6 +7,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const net = require('node:net');
+const http = require('node:http');
 const zlib = require('node:zlib');
 const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
@@ -69,6 +70,30 @@ function worksheetXml(buffer) {
   throw new Error('Template workbook contains no first worksheet');
 }
 
+async function mockModelServer() {
+  const calls = [];
+  const server = http.createServer(async (request, response) => {
+    try {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      const last = body.messages?.at(-1)?.content || '';
+      let evidence;
+      try { evidence = JSON.parse(last).read_only_evidence; } catch {}
+      calls.push({ path: request.url, body, evidence, authorization: request.headers.authorization });
+      const answer = evidence ? '浏览器验收模型回答：已读取本次只读证据，未执行PLC操作。' : '浏览器验收模型连接成功。';
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      if (request.url === '/api/chat') response.end(JSON.stringify({ message: { role: 'assistant', content: answer }, done: true }));
+      else if (request.url === '/v1/chat/completions') response.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: answer }, finish_reason: 'stop' }] }));
+      else { response.statusCode = 404; response.end(JSON.stringify({ error: 'Unexpected mock endpoint' })); }
+    } catch (error) {
+      response.writeHead(400, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ error: error.message }));
+    }
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  return { server, calls, base: `http://127.0.0.1:${server.address().port}` };
+}
+
 async function main() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'iag-desktop-browser-'));
   const common = [...PREFIX, '--root', root];
@@ -80,7 +105,7 @@ async function main() {
   const port = await freePort(), base = `http://127.0.0.1:${port}`;
   const server = spawn(EXECUTABLE, [...common, '--no-browser', '--port', String(port)],
     { cwd: REPO, stdio: ['ignore', 'pipe', 'pipe'] });
-  let serverLog = '', spawnError, browser, page, stoppedByUi = false;
+  let serverLog = '', spawnError, browser, page, mock, stoppedByUi = false;
   server.stdout.on('data', chunk => { serverLog += chunk.toString(); });
   server.stderr.on('data', chunk => { serverLog += chunk.toString(); });
   server.on('error', error => { spawnError = error; });
@@ -91,6 +116,7 @@ async function main() {
   };
   const step = async (name, operation) => { await operation(); checks.push(name); console.log('PASS ' + name); };
   try {
+    mock = await mockModelServer();
     await eventually(async () => {
       if (spawnError || server.exitCode !== null) throw spawnError || new Error(serverLog);
       const response = await fetch(base + '/api/current');
@@ -105,6 +131,7 @@ async function main() {
     page.on('console', entry => {
       if (entry.type() !== 'error') return;
       if (entry.location().url.endsWith('/favicon.ico')) benignConsole.push('Unconfigured browser favicon');
+      else if (entry.text().startsWith('Failed to load resource:') && entry.text().includes('412')) benignConsole.push('Expected model version conflict');
       else consoleErrors.push(entry.text());
     });
     await page.goto(base);
@@ -236,7 +263,132 @@ async function main() {
       await capture('06-mobile-overview');
       await page.setViewportSize({ width: 1440, height: 1080 });
     });
-    await step('07 header exit confirmation stops acquisition and the desktop process', async () => {
+    await step('07 candidate model test sends no industrial data and saving remains idle', async () => {
+      await selectPage(page, '模型设置');
+      const before = await fetch(base + '/api/ai/config').then(response => response.json());
+      assert.equal(before.provider, 'local_rules');
+      await page.getByLabel('回答方式', { exact: true }).selectOption('ollama');
+      await page.getByLabel('模型服务地址', { exact: true }).fill(mock.base);
+      await page.getByLabel('模型名称', { exact: true }).fill('qa-ollama');
+      await page.getByLabel('等待回答的最长时间（秒）', { exact: true }).fill('10');
+      await page.getByLabel('回答长度上限（Token）', { exact: true }).fill('128');
+      await wait(350); assert.equal(mock.calls.length, 0, 'Opening model settings must not trigger model inference');
+      const tested = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/test');
+      await page.getByRole('button', { name: '测试候选模型', exact: true }).click();
+      assert.equal((await tested).status(), 200);
+      await page.getByText(/测试不会保存候选设置/).waitFor();
+      assert.equal(mock.calls.length, 1); assert.equal(mock.calls[0].path, '/api/chat');
+      assert.equal(mock.calls[0].evidence, undefined);
+      assert.equal(mock.calls[0].body.messages.some(message => message.content.includes('read_only_evidence')), false);
+      assert.deepEqual(await fetch(base + '/api/ai/config').then(response => response.json()), before);
+      const saved = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/config' && response.request().method() === 'POST');
+      await page.getByRole('button', { name: '保存模型设置', exact: true }).click();
+      const applied = await saved; assert.equal(applied.status(), 200);
+      const stored = await applied.json(); assert.equal(stored.provider, 'ollama'); assert.equal(stored.model, 'qa-ollama');
+      await page.getByRole('status').getByText(/模型设置已保存/).waitFor();
+      await wait(350); assert.equal(mock.calls.length, 1, 'Saving configuration must not trigger inference');
+      await capture('07-ollama-model-settings', { fullPage: true });
+    });
+    await step('08 explicit model query includes PIN, configuration version and read-only current evidence', async () => {
+      await selectPage(page, '按需数据查询');
+      await page.locator('.content > .notice').filter({ hasText: /当前：Ollama模型 · qa-ollama/ }).waitFor();
+      assert.notEqual(await page.getByLabel('本机管理口令', { exact: true }).inputValue(), '');
+      const variables = page.getByLabel('分析变量', { exact: true });
+      await variables.selectOption({ label: '模拟真空压力' });
+      await page.getByLabel('输入问题', { exact: true }).fill('现在模拟真空压力是多少？说明数据质量');
+      const submitted = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/query');
+      await page.getByRole('button', { name: '提交查询 ↗', exact: true }).click();
+      const answer = await submitted; assert.equal(answer.status(), 200);
+      const headers = answer.request().headers(); assert.ok(headers['x-operator-pin']); assert.match(headers['if-match'], /^"ai-\d+"$/);
+      const data = await answer.json(); assert.equal(data.provider, 'ollama'); assert.equal(data.query_type, 'current');
+      assert.equal(data.plc_write_allowed, false); assert.ok(data.evidence_count > 0);
+      const modelCall = mock.calls.at(-1); assert.equal(modelCall.path, '/api/chat');
+      assert.equal(modelCall.evidence.plc_write_allowed, false); assert.equal(modelCall.evidence.query_type, 'current');
+      assert.equal(modelCall.evidence.current_items.length, 1); assert.equal(modelCall.evidence.history_items.length, 0);
+      assert.ok(modelCall.evidence.current_items[0].quality); assert.ok(modelCall.evidence.current_items[0].timestamp);
+      assert.deepEqual(data.evidence, modelCall.evidence, 'Displayed query evidence must match the actual model input');
+      await page.locator('.ai-answer > p').filter({ hasText: /浏览器验收模型回答/ }).waitFor();
+      await capture('08-ollama-read-only-answer', { fullPage: true });
+      const count = mock.calls.length; await wait(350); assert.equal(mock.calls.length, count, 'Answer rendering must not restart model calls');
+    });
+    await step('09 OpenAI-compatible model tests, saves and queries without exposing its key', async () => {
+      await selectPage(page, '模型设置');
+      await page.getByLabel('回答方式', { exact: true }).selectOption('openai_compatible');
+      await page.getByLabel('模型服务地址', { exact: true }).fill(mock.base + '/v1');
+      await page.getByLabel('模型名称', { exact: true }).fill('qa-compatible');
+      const key = page.getByLabel('API Key（可选）', { exact: true });
+      assert.equal(await key.getAttribute('type'), 'password'); await key.fill('mock-acceptance-key');
+      const tested = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/test');
+      await page.getByRole('button', { name: '测试候选模型', exact: true }).click();
+      assert.equal((await tested).status(), 200);
+      assert.equal(mock.calls.at(-1).path, '/v1/chat/completions'); assert.equal(mock.calls.at(-1).evidence, undefined);
+      assert.equal(mock.calls.at(-1).authorization, 'Bearer mock-acceptance-key');
+      assert.equal(await key.inputValue(), 'mock-acceptance-key', 'Candidate test must preserve an entered key for the following save');
+      const count = mock.calls.length;
+      const saved = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/config' && response.request().method() === 'POST');
+      await page.getByRole('button', { name: '保存模型设置', exact: true }).click();
+      const applied = await saved; assert.equal(applied.status(), 200);
+      const config = await applied.json(); assert.equal(config.api_key_set, true); assert.equal(Object.hasOwn(config, 'api_key'), false);
+      await eventually(() => key.inputValue().then(value => value === ''), 'Saved key input was not cleared');
+      assert.equal(mock.calls.length, count, 'Saving a compatible model must not call it');
+      const publiclyReadable = await fetch(base + '/api/ai/config').then(response => response.text());
+      assert.equal(publiclyReadable.includes('mock-acceptance-key'), false);
+      await capture('09-compatible-model-settings', { fullPage: true });
+      await selectPage(page, '按需数据查询');
+      await page.locator('.content > .notice').filter({ hasText: /当前：OpenAI兼容模型 · qa-compatible/ }).waitFor();
+      const submitted = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/query');
+      await page.getByRole('button', { name: '提交查询 ↗', exact: true }).click();
+      const answer = await submitted; assert.equal(answer.status(), 200); assert.equal((await answer.json()).provider, 'openai_compatible');
+      assert.equal(mock.calls.at(-1).authorization, 'Bearer mock-acceptance-key');
+      assert.ok(mock.calls.at(-1).evidence.current_items.length > 0);
+      await page.locator('.ai-answer > p').filter({ hasText: /浏览器验收模型回答/ }).waitFor();
+    });
+    await step('10 stale model settings preserve the user draft and can reload current configuration', async () => {
+      await selectPage(page, '模型设置');
+      await page.getByLabel('模型名称', { exact: true }).fill('unsaved-model-draft');
+      const latest = await fetch(base + '/api/ai/config'); const config = await latest.json();
+      const pin = (await fs.readFile(path.join(root, 'data/operator_pin.txt'), 'utf8')).trim();
+      const changedElsewhere = await fetch(base + '/api/ai/config', { method: 'POST', headers: {
+        'Content-Type': 'application/json', 'X-Operator-Pin': pin, 'If-Match': latest.headers.get('etag') },
+        body: JSON.stringify({ model: 'modified-other-page' }) });
+      assert.equal(changedElsewhere.status, 200);
+      const saved = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/config' && response.request().method() === 'POST');
+      await page.getByRole('button', { name: '保存模型设置', exact: true }).click();
+      assert.equal((await saved).status(), 412);
+      await page.getByRole('alert').getByText(/模型草稿已保留/).waitFor();
+      assert.equal(await page.getByLabel('模型名称', { exact: true }).inputValue(), 'unsaved-model-draft');
+      assert.equal((await fetch(base + '/api/ai/config').then(response => response.json())).model, 'modified-other-page');
+      await page.getByRole('button', { name: '放弃草稿，载入已保存配置', exact: true }).click();
+      await eventually(() => page.getByLabel('模型名称', { exact: true }).inputValue().then(value => value === 'modified-other-page'), 'Reload did not show current model configuration');
+      assert.equal(await page.getByLabel('API Key（可选）', { exact: true }).inputValue(), '');
+      assert.equal(config.api_key_set, true);
+    });
+    await step('11 local rules restore without model calls and PLC clear options are explicit', async () => {
+      const count = mock.calls.length;
+      await page.getByLabel('回答方式', { exact: true }).selectOption('local_rules');
+      const saved = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/config' && response.request().method() === 'POST');
+      await page.getByRole('button', { name: '保存模型设置', exact: true }).click();
+      assert.equal((await saved).status(), 200); assert.equal(mock.calls.length, count);
+      await selectPage(page, '按需数据查询'); await page.locator('.content > .notice').filter({ hasText: /当前：本地规则统计/ }).waitFor();
+      await page.getByRole('button', { name: '清除口令', exact: true }).click();
+      const submitted = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/query');
+      await page.getByRole('button', { name: '提交查询 ↗', exact: true }).click();
+      assert.equal((await submitted).status(), 200); assert.equal(mock.calls.length, count);
+      await selectPage(page, 'PLC连接');
+      const pin = (await fs.readFile(path.join(root, 'data/operator_pin.txt'), 'utf8')).trim();
+      await page.getByLabel('本机管理口令', { exact: true }).fill(pin);
+      await page.getByText('证书与账号配置（空白保留现有设置）', { exact: true }).click();
+      await page.getByLabel('清除已有证书配置', { exact: true }).check();
+      await page.getByLabel('清除已有用户名，使用匿名连接', { exact: true }).check();
+      assert.equal(await page.getByLabel('用户名', { exact: true }).isDisabled(), true);
+      assert.equal(await page.getByLabel('安全策略与证书路径', { exact: true }).isDisabled(), true);
+      const tested = page.waitForResponse(response => new URL(response.url()).pathname === '/api/connection/test');
+      await page.getByRole('button', { name: '测试候选连接', exact: true }).click();
+      const candidate = await tested; assert.equal(candidate.status(), 200);
+      const body = candidate.request().postDataJSON(); assert.equal(body.username, ''); assert.equal(body.security_string, '');
+      assert.equal(mock.calls.length, count);
+    });
+    await step('12 header exit confirmation stops acquisition and the desktop process', async () => {
       await selectPage(page, 'PLC连接');
       assert.notEqual(await page.getByLabel('本机管理口令', { exact: true }).inputValue(), '');
       const shutdown = page.waitForResponse(response => new URL(response.url()).pathname === '/api/shutdown');
@@ -257,7 +409,7 @@ async function main() {
       await assert.rejects(fetch(base + '/api/health'), 'HTTP listener remains active after process exit');
       await assert.rejects(fs.access(path.join(root, 'data/gateway.pid')));
       await assert.rejects(fs.access(path.join(root, 'data/desktop-instance.json')));
-      await capture('07-ui-shutdown');
+      await capture('12-ui-shutdown');
     });
     assert.deepEqual(pageErrors, [], 'Unexpected browser JavaScript errors');
     assert.deepEqual(consoleErrors, [], 'Unexpected application console errors');
@@ -275,6 +427,7 @@ async function main() {
       await eventually(() => server.exitCode !== null, 'Test cleanup could not stop desktop process', 5000);
       assert.equal(server.exitCode, 0, serverLog);
     }
+    if (mock) { mock.server.closeAllConnections(); await new Promise(resolve => mock.server.close(resolve)); }
   }
 }
 main().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

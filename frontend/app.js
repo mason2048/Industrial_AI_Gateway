@@ -29,10 +29,11 @@ createApp({
     const { json, managementHeaders } = IAGApi;
     const nav = [{ id: 'overview', title: '设备总览', icon: '▦' }, { id: 'connection', title: 'PLC连接', icon: '⌁' },
       { id: 'tags', title: '点位管理', icon: '⊞' }, { id: 'realtime', title: '实时监控', icon: '∿' },
-      { id: 'history', title: '历史曲线', icon: '◷' }, { id: 'ai', title: '按需数据查询', icon: '✧' }, { id: 'diagnostics', title: '运行诊断', icon: '⚙' }];
+      { id: 'history', title: '历史曲线', icon: '◷' }, { id: 'ai', title: '按需数据查询', icon: '✧' },
+      { id: 'model', title: '模型设置', icon: '◇' }, { id: 'diagnostics', title: '运行诊断', icon: '⚙' }];
     const page = ref('overview'), current = ref({ items: [], mode: 'simulation', total: 0, good: 0, scan_ms: 0 });
     const config = ref({ poll_interval: 1, batch_size: 100, heartbeat_seconds: 1800, retention_days: 7 });
-    const connection = ref({ mode: 'simulation', endpoint: 'opc.tcp://127.0.0.1:4840', username: '', security_string: '', password_env: '',
+    const connection = ref({ mode: 'simulation', endpoint: 'opc.tcp://127.0.0.1:4840', username: '', security_string: '', password_env: '', clear_username: false, clear_security_string: false,
       poll_interval: 1, batch_size: 100, heartbeat_seconds: 1800, retention_days: 7 });
     const tags = ref([]), search = ref(''), tagPage = ref(1), error = ref(''), message = ref(''), clock = ref('');
     const activity = ref(0), busy = computed(() => activity.value > 0), managerPin = ref(''), tagETag = ref(null), configETag = ref(null), connectionDraftETag = ref(null);
@@ -41,6 +42,15 @@ createApp({
     const historyForm = ref({ device: '', variableKey: '', start: localInput(new Date(Date.now() - 86400000)), end: localInput(new Date()), source: 'simulation' });
     const historyLoading = ref(false), historyError = ref('');
     const aiForm = ref({ device: '', variable: '', question: '' }), aiResult = ref(null), aiStatus = ref(null);
+    const modelDefaults = { provider: 'local_rules', base_url: 'http://127.0.0.1:11434', model: '', timeout_seconds: 60, max_output_tokens: 1024, temperature: 0.2 };
+    const modelConfig = ref({ ...modelDefaults, api_key_set: false }), modelLoaded = ref(false);
+    const modelForm = ref({ ...modelDefaults, api_key: '', clear_api_key: false }), modelETag = ref(null), modelDraftETag = ref(null);
+    const modelDraftInitialized = ref(false), modelTest = ref(null);
+    const modelProviders = { local_rules: '本地规则统计', ollama: 'Ollama模型', openai_compatible: 'OpenAI兼容模型' };
+    const modelLabel = computed(() => !modelLoaded.value ? '等待读取模型配置'
+      : `${modelProviders[modelConfig.value.provider] || '未知服务'}${modelConfig.value.model && modelConfig.value.provider !== 'local_rules' ? ' · ' + modelConfig.value.model : ''}`);
+    const usesModel = computed(() => modelLoaded.value && modelConfig.value.provider !== 'local_rules');
+    const remoteModel = computed(() => modelConfig.value.deployment === 'remote_server');
     const editing = ref(null), editingOriginal = ref(null), editingETag = ref(null), modalError = ref(''), importPreview = ref(null);
     const writeTag = ref(null), writePin = ref(''), writeValue = ref(''), writeProposal = ref(null), writeText = ref('');
     const connectionTest = ref(null), validation = ref(null), diagnostics = ref(null), readiness = ref(null);
@@ -54,8 +64,9 @@ createApp({
     const pageTitle = computed(() => nav.find(item => item.id === page.value)?.title);
     const descriptions = { overview: '按设备选择关键参数，查看完整时间范围的趋势。', connection: '在这里修改通信地址、轮询读取周期、批次和全局历史策略。',
       tags: '管理变量定义、读取权限与历史保存策略。', realtime: '查看最新设备数据、通讯质量与数据时间。',
-      history: '按连接和变量版本追溯历史，保留退役点位记录。', ai: '提交问题后读取数据；当前使用本地规则统计，尚未连接AI模型。', diagnostics: '检查采集、历史存储、队列和磁盘状态。' };
-    const pageDescription = computed(() => descriptions[page.value]);
+      history: '按连接和变量版本追溯历史，保留退役点位记录。', ai: '只在提交问题后查询所选设备数据。',
+      model: '选择本地规则、本机模型或兼容API，测试后保存。', diagnostics: '检查采集、历史存储、队列和磁盘状态。' };
+    const pageDescription = computed(() => page.value === 'ai' ? `${descriptions.ai} 当前：${modelLabel.value}。` : descriptions[page.value]);
     const devices = computed(() => [...new Set(tags.value.map(tag => tag.device))]);
     const overviewTags = computed(() => tags.value.filter(tag => tag.device === overviewDevice.value));
     const overviewSensor = computed(() => overviewTags.value.find(tag => tag.id === Number(overviewTagId.value)));
@@ -73,7 +84,7 @@ createApp({
     const currentPages = computed(() => Math.max(1, Math.ceil(filteredCurrent.value.length / 50)));
     const pagedCurrent = computed(() => filteredCurrent.value.slice((tagPage.value - 1) * 50, tagPage.value * 50));
     const canWrite = computed(() => IAGRealtime.canWrite(current.value));
-    const showManagement = computed(() => ['tags', 'connection', 'diagnostics'].includes(page.value));
+    const showManagement = computed(() => ['tags', 'connection', 'diagnostics', 'model', 'ai'].includes(page.value));
     watch(search, () => { tagPage.value = 1; });
     watch(() => historyForm.value.device, reconcileHistoryVariable);
     watch(overviewDevice, reconcileOverview);
@@ -110,9 +121,20 @@ createApp({
       const result = await api.requestResult('/api/config', { channel: 'config' });
       config.value = result.data; configETag.value = result.etag;
     }
+    async function loadModelConfig(resetDraft = false) {
+      try {
+        const result = await api.requestResult('/api/ai/config', { channel: 'model-config' });
+        modelConfig.value = result.data; modelETag.value = result.etag; modelLoaded.value = true;
+        if (resetDraft) {
+          modelForm.value = { ...modelDefaults, ...result.data, api_key: '', clear_api_key: false };
+          modelDraftETag.value = result.etag; modelDraftInitialized.value = true; modelTest.value = null;
+        }
+      } catch (failure) { if (failure.name !== 'AbortError') modelLoaded.value = false; throw failure; }
+    }
     async function refresh() {
       await action(async () => {
         const results = await Promise.allSettled([loadTags(), loadConfig()]);
+        if (['model', 'ai'].includes(page.value)) await loadModelConfig(false);
         const failed = results.find(result => result.status === 'rejected' && result.reason.name !== 'AbortError');
         if (page.value === 'overview') await loadOverview();
         if (failed) throw failed.reason;
@@ -133,14 +155,17 @@ createApp({
     function candidateConnection() {
       const candidate = { mode: connection.value.mode, endpoint: connection.value.endpoint };
       for (const field of ['username', 'security_string', 'password_env']) if (connection.value[field]) candidate[field] = connection.value[field];
+      if (connection.value.clear_username) candidate.username = '';
+      if (connection.value.clear_security_string) candidate.security_string = '';
       for (const field of ['poll_interval', 'batch_size', 'heartbeat_seconds', 'retention_days']) candidate[field] = Number(connection.value[field]);
       return candidate;
     }
     async function navigate(id) {
+      if (page.value === 'model' && id !== 'model') modelForm.value.api_key = '';
       page.value = id; search.value = ''; tagPage.value = 1; error.value = ''; message.value = '';
       if (id === 'connection') {
         connection.value = { mode: config.value.mode || current.value.mode, endpoint: config.value.endpoint || current.value.endpoint,
-          username: '', security_string: '', password_env: '', poll_interval: config.value.poll_interval ?? 1, batch_size: config.value.batch_size ?? 100,
+          username: '', security_string: '', password_env: '', clear_username: false, clear_security_string: false, poll_interval: config.value.poll_interval ?? 1, batch_size: config.value.batch_size ?? 100,
           heartbeat_seconds: config.value.heartbeat_seconds ?? 1800, retention_days: config.value.retention_days ?? 7 };
         connectionDraftETag.value = configETag.value;
       }
@@ -150,6 +175,39 @@ createApp({
       }
       if (id === 'overview') await loadOverview();
       if (id === 'diagnostics') await loadDiagnostics();
+      if (id === 'model') await action(() => loadModelConfig(!modelDraftInitialized.value));
+      if (id === 'ai') await action(() => loadModelConfig(false));
+    }
+    function selectModelProvider() {
+      modelTest.value = null;
+      if (modelForm.value.provider === 'ollama') modelForm.value.base_url = 'http://127.0.0.1:11434';
+      else if (modelForm.value.provider === 'openai_compatible') modelForm.value.base_url = 'http://127.0.0.1:1234/v1';
+      else modelForm.value.base_url = 'http://127.0.0.1:11434';
+      modelForm.value.api_key = ''; modelForm.value.clear_api_key = false;
+    }
+    function candidateModel() {
+      return { provider: modelForm.value.provider, base_url: modelForm.value.base_url, model: modelForm.value.model,
+        timeout_seconds: Number(modelForm.value.timeout_seconds), max_output_tokens: Number(modelForm.value.max_output_tokens),
+        temperature: Number(modelForm.value.temperature), api_key: modelForm.value.api_key, clear_api_key: modelForm.value.clear_api_key };
+    }
+    async function reloadModel() { await action(() => loadModelConfig(true)); }
+    async function saveModel() {
+      await action(async () => {
+        try {
+          await api.request('/api/ai/config', json('POST', candidateModel(), managementHeaders(managerPin.value, modelDraftETag.value)));
+          await loadModelConfig(true); aiResult.value = null; message.value = '模型设置已保存。只有提交问题时才会调用模型。';
+        } catch (failure) {
+          if (failure.status === 412) failure.message += ' 模型草稿已保留；可放弃草稿并载入已保存配置后重新修改。';
+          throw failure;
+        }
+      });
+    }
+    async function testModel() {
+      await action(async () => {
+        modelTest.value = null;
+        modelTest.value = await api.request('/api/ai/test', { ...json('POST', candidateModel(), managementHeaders(managerPin.value)),
+          timeout: (Number(modelForm.value.timeout_seconds) || 60) * 1000 + 10000 });
+      });
     }
     async function saveConnection() {
       await action(async () => {
@@ -257,7 +315,16 @@ createApp({
       catch (failure) { if (sequence === historyAction && failure.name !== 'AbortError') historyError.value = failure.message; }
       finally { if (sequence === historyAction) historyLoading.value = false; }
     }
-    async function askAI() { await action(async () => { aiResult.value = await api.request('/api/ai/query', { ...json('POST', { ...aiForm.value, variable: aiForm.value.variable || null }), channel: 'ai-query' }); }); }
+    async function askAI() {
+      await action(async () => {
+        aiResult.value = null;
+        if (!modelLoaded.value) throw new Error('尚未载入模型配置，请刷新页面后再提交查询。');
+        const headers = usesModel.value ? managementHeaders(managerPin.value, modelETag.value)
+          : { ...(managerPin.value.trim() ? managementHeaders(managerPin.value) : {}), ...(modelETag.value ? { 'If-Match': modelETag.value } : {}) };
+        aiResult.value = await api.request('/api/ai/query', { ...json('POST', { ...aiForm.value, variable: aiForm.value.variable || null }, headers),
+          channel: 'ai-query', timeout: usesModel.value ? (Number(modelConfig.value.timeout_seconds) || 60) * 1000 + 10000 : 15000 });
+      });
+    }
     async function getStatus() { await action(async () => { aiStatus.value = await api.request('/api/ai/status?' + new URLSearchParams({ device: aiForm.value.device }), { channel: 'ai-status' }); }); }
     async function loadDiagnostics() {
       await action(async () => {
@@ -315,15 +382,17 @@ createApp({
       overviewTimer = setInterval(() => { if (page.value === 'overview') loadOverview(); }, 30000);
       await refresh();
     });
-    onUnmounted(() => { poller.stop(); clearInterval(overviewTimer); clearInterval(clockTimer); api.cancelAll(); managerPin.value = ''; });
+    onUnmounted(() => { poller.stop(); clearInterval(overviewTimer); clearInterval(clockTimer); api.cancelAll(); managerPin.value = ''; modelForm.value.api_key = ''; });
     return { nav, page, current, config, connection, tags, search, tagPage, error, message, busy, clock, managerPin, showManagement,
       overviewDevice, overviewTags, keyTagIds, overviewTagId, overviewSensor, overviewHistory, overviewError, overviewSeriesGroups,
       historyData, historySeries, historySeriesGroups, historySelection, historyForm, historyDevices, historyVariables, historyLoading, historyError,
       aiForm, aiResult, aiStatus, editing, editingOriginal, modalError, importPreview, writeTag, writePin, writeValue, writeProposal, writeText,
+      modelConfig, modelForm, modelLoaded, modelLabel, usesModel, remoteModel, modelTest, modelDraftInitialized,
       connectionTest, validation, diagnostics, readiness, editFields, pageTitle, pageDescription, devices, keySensors, filteredTags, pagedTags,
       tagPages, tagRowNumber, pagedCurrent, currentPages, canWrite, fmt, localTime, variableKey: IAGHistory.variableKey, variableLabel,
       navigate, refresh, saveConnection, reloadConnection, testConnection, validateTags, importTags, applyImport, editTag, copyTag, allocateTagId, reloadEditing, saveTag, removeTag,
       shutdownGateway, shutdownRequested,
+      selectModelProvider, reloadModel, saveModel, testModel,
       refreshHistoryCatalog, submitHistory, pageHistory, askAI, getStatus, loadDiagnostics, openWrite, closeWrite, proposeWrite, confirmWrite };
   }
 }).mount('#app');
