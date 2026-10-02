@@ -1,0 +1,16 @@
+{
+  "mode": "simulation",
+  "endpoint": "opc.tcp://127.0.0.1:4840",
+  "poll_interval": 1.0,
+  "batch_size": 100,
+  "heartbeat_seconds": 1800,
+  "retention_days": 7,
+  "queue_capacity": 120,
+  "simulation_write_enabled": false,
+  "disk_min_free_mb": 100,
+  "backup_enabled": true,
+  "security_string": "",
+  "username": "",
+  "password_env": "PLC_OPCUA_PASSWORD",
+  "ai_provider": "local_rules"
+}

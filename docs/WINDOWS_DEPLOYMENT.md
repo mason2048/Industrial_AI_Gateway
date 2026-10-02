@@ -1,0 +1,105 @@
+# Windows 部署说明
+
+适用于 Windows 10 / 11 x64。EXE 自带 Python 运行环境和本地界面资源，无需额外安装 Python、Node.js、Docker、Excel。操作界面在本机浏览器打开，数据保存在本机。
+
+## 下载与打开
+
+1. 前往 [GitHub Releases](https://github.com/mason2048/Industrial_AI_Gateway/releases/latest)，下载 `Industrial_AI_Gateway-v1.2.0-windows-x64.zip`。
+2. 将 ZIP **完整解压**到本机文件夹，再双击 `IndustrialAIGateway.exe`。第一次解包运行环境可能需要几秒。
+3. 软件自动打开浏览器。首次启动是明确标注的模拟模式，包含 6 个样本点，不带预置历史。看到模拟数值说明软件可以运行。
+4. 双击 `打开数据目录.cmd`，找到 `data\operator_pin.txt`，复制口令到页面的管理口令框。
+
+单独的 `IndustrialAIGateway.exe` 也能运行。便携 ZIP 额外包含停止/打开数据目录快捷脚本、说明、完整第三方许可证和相应依赖源码。
+
+关闭浏览器页面后，采集程序继续运行。页面右上角 **退出软件** 或 `停止软件.cmd` 会请求正常停止并保存待写历史；再次双击 EXE 可以重新打开。重复双击运行中的 EXE 会打开同一安装实例。
+
+## 修改通信地址与读取方式
+
+打开 **PLC连接**：
+
+- **运行模式**：选择真实 PLC 的 OPC UA 只读模式。
+- **服务器地址**：填写实际端点，例如 `opc.tcp://127.0.0.1:4840` 是本机示例，现场必须使用实际服务地址。
+- **读取周期**：默认 1 秒；**每批点数**默认 100，上限 1000。
+- **默认保存间隔**：默认 1800 秒，即半小时；逐点留空时继承此设置。
+- **历史保留天数**：最长 7 天，超期采样自动清理。
+- **证书与账号配置**：填写用户名、密码环境变量名称、客户端证书和私钥绝对路径。密码不保存在页面，客户端证书需要服务器信任。
+
+先测试候选连接，再保存。测试使用独立只读会话，不切换当前采集连接。修改需要管理口令；出现版本冲突时重新加载并核对后提交。
+
+本版采用周期批量轮询，尚未提供订阅切换或自动写入 PLC 心跳握手点。KEPServerEX 的 PLC 驱动、原始地址映射在 KEPServerEX 中配置，本软件使用已发布的 OPC UA NodeId。
+
+## Excel 配置点位
+
+1. 在 **点位管理** 下载空模板；最多 1000 点，文件不超过 5 MB。
+2. 填写 ID、地址、名称、类型、单位、权限、AI描述、保存、阈值；还可填写设备、NodeId、保存间隔秒、小数位数、记录变化。
+3. BOOL、WORD、DWORD、FLOAT 分别对应 Boolean、UInt16、UInt32、Float。NodeId 必须是服务器实际发布的值，PLC 原始地址不能替代 NodeId。
+4. 导入后核对新增/修改/删除摘要，再确认应用。导入是整表替换；修改已有点表前建议先导出当前点表。
+5. 确认 **实时监控** 的质量为 Good，采集时间持续刷新。关闭历史保存的点仍可查询当前值。
+
+默认每半小时保存。开启“记录变化”后，相对上次已保存值的变化超过阈值时额外保存；BOOL 翻转和质量变化也会记录。真空变量默认显示 5 位小数，支持逐点 0–10 位；显示精度不改变 PLC 提供的原始精度。
+
+ID 永久绑定设备、地址、类型、NodeId。需要换地址时，在编辑窗口使用 **复制为新点位**，填写新名称及地址，保存后删除旧点。旧历史仍可追溯。
+
+真实 PLC 写入在接口和驱动层禁止，AI 没有写入权限；AI描述只用于解释变量，不用来决定权限。
+
+## 数据目录、升级与退出
+
+默认数据目录是 `EXE 所在文件夹\gateway-data`。首次运行位置不可写时使用 `%LOCALAPPDATA%\IndustrialAIGateway`。如果已有数据所在位置后来不可写，软件报错并保留该目录，不会静默创建另一份现场数据。
+
+| 路径 | 内容 |
+| --- | --- |
+| `config\config.json` | 当前连接与保存配置 |
+| `data\history.db` | SQLite 点位定义和历史 |
+| `data\operator_pin.txt` | 本机生成的管理口令 |
+| `data\backups` | 自动完整备份（默认每天，保留 7 份） |
+| `data\logs\gateway.log` | 采集与存储运行日志 |
+| `logs\desktop.log` | EXE 启动、退出事件；不记录配置凭据 |
+| `check-result.json` | `--check` 检查结果 |
+
+升级：先正常退出，保存完整 `gateway-data` 副本，再替换 EXE，保持原目录。不要在程序运行时只复制 `history.db` 而遗漏 WAL。证书、私钥与密码环境变量需另行管理；不要上传到公开 GitHub。
+
+仅关闭浏览器不会停机。停止过程中应等待程序退出；快捷脚本超时会报告未完成，不会按 PID 强杀其他程序。
+
+## 常见问题
+
+| 现象 | 处理 |
+| --- | --- |
+| 没自动打开页面 | 再次双击 EXE，或查看浏览器/桌面日志。默认地址 `http://127.0.0.1:8080`；端口占用时会自动选择并提示。 |
+| 启动后数值正常但 PLC 未连接 | 首次为模拟模式；先导入真实点位，再在 PLC连接切换真实 OPC UA。 |
+| 连接失败或质量不是 Good | 核对实际端点、NodeId、现场网络、用户权限、证书信任；查看运行诊断。 |
+| 口令无效 | 使用当前数据目录 `data\operator_pin.txt`，不要混用其他安装的口令。 |
+| 导入失败 | 使用本版模板，修正提示行；ID、设备内名称和地址不可重复。失败不会部分替换。 |
+| 端口都被占用 | 使用命令行 `IndustrialAIGateway.exe --port 8090` 指定一个空闲本机端口。 |
+| 数据目录不可写 | 恢复现有目录写权限，或正常停止后把完整数据移到可写目录，再用 `--root` 明确指定。 |
+
+当前界面中的 AI 使用本地规则查询和统计，不含外部大模型，也不主动上传数据。自动化验证使用模拟数据及本机 OPC UA 服务器，实际 PLC 的权限、证书、断线恢复和 1000 点采集性能需要现场确认。
+
+## 命令行与源码服务
+
+在 EXE 文件夹打开终端可执行（PowerShell 在文件名前加 `./`）：
+
+```bat
+IndustrialAIGateway.exe --check
+IndustrialAIGateway.exe --no-browser
+IndustrialAIGateway.exe --root "D:\GatewayData" --port 8081 --no-browser
+IndustrialAIGateway.exe --root "D:\GatewayData" --stop
+IndustrialAIGateway.exe --open-data
+```
+
+`--check` 只建立缺失的安全默认配置/样本点，并检查安装，不连接 PLC、不打开数据库、不进行采集。结果同时写入数据目录 `check-result.json`，便于无控制台 EXE 查看。
+
+Windows 服务采用单独的源码安装方式，见 [源码安装与服务](WINDOWS_SOURCE_INSTALL.md)；当前便携 EXE 是用户启动的本地程序，不会自动注册开机服务。
+
+## 从源码构建 EXE
+
+需要 Windows x64 和 Python 3.12。在公开源码目录执行：
+
+```bat
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-build-lock.txt
+.venv\Scripts\python.exe scripts\build_windows.py
+```
+
+构建流程只使用 `config/config.example.json` 与静态界面，不读取现场配置、数据库、口令或证书。PyInstaller 将运行环境和资源嵌入 EXE；第三方许可、OPC UA 依赖源码及重建说明一并保留。
+
+[Windows 发行工作流](../.github/workflows/windows-release.yml) 会先运行测试，再生成 EXE 并在 Windows 启动，检查存活、6 个模拟点、Excel 模板、持久化数据库和正常退出。推送版本标签后发布 EXE、便携 ZIP 和 SHA-256 校验文件到 Releases。

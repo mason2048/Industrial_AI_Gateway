@@ -1,0 +1,116 @@
+name: Windows EXE build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-exe-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements-lock.txt
+            requirements-build-lock.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked dependencies
+        run: |
+          python -m pip install -r requirements-build-lock.txt
+          python -m pip check
+      - name: Validate application and safe packaging
+        run: |
+          python -m pytest -q --disable-warnings tests
+          node --test tests/frontend_v11.test.cjs tests/frontend_basic.test.cjs
+      - name: Build self-contained Windows x64 program
+        shell: pwsh
+        run: |
+          $version = (python -c "from backend.version import APP_VERSION; print(APP_VERSION)").Trim()
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw 'Release tag must match backend/version.py.'
+          }
+          python scripts/build_windows.py --version $version
+          if ($LASTEXITCODE -ne 0) { throw 'EXE build failed.' }
+          "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Run the actual EXE without Python on its PATH
+        shell: pwsh
+        run: |
+          ./scripts/smoke_windows.ps1 -Executable dist/windows/IndustrialAIGateway.exe -ExpectedVersion $env:APP_VERSION
+      - name: Validate rendered desktop controls and UI exit against the EXE
+        shell: pwsh
+        run: |
+          $browserDirectory = Join-Path $env:RUNNER_TEMP 'gateway-browser-test'
+          npm install --prefix $browserDirectory --no-package-lock --no-save playwright@1.58.2
+          if ($LASTEXITCODE -ne 0) { throw 'Browser test dependency installation failed.' }
+          $env:PLAYWRIGHT_MODULE = Join-Path $browserDirectory 'node_modules/playwright'
+          node (Join-Path $env:PLAYWRIGHT_MODULE 'cli.js') install chromium
+          if ($LASTEXITCODE -ne 0) { throw 'Isolated Chromium installation failed.' }
+          $env:IAG_DESKTOP_EXECUTABLE = (Resolve-Path 'dist/windows/IndustrialAIGateway.exe').Path
+          node tests/browser_desktop.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'EXE desktop browser acceptance failed.' }
+      - name: Preserve Windows smoke result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe-smoke-result
+          path: dist/windows/WINDOWS_SMOKE_REPORT.json
+          if-no-files-found: ignore
+      - name: Upload verified release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: Industrial-AI-Gateway-Windows-x64
+          path: |
+            dist/windows/IndustrialAIGateway.exe
+            dist/windows/Industrial_AI_Gateway-*-windows-x64.zip
+            dist/windows/SHA256SUMS.txt
+            dist/windows/BUILD_INFO.json
+            dist/windows/WINDOWS_SMOKE_REPORT.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish public GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = Join-Path $env:RUNNER_TEMP 'gateway-release-notes.md'
+          @"
+          Windows x64 本地版，解压 ZIP 后双击 IndustrialAIGateway.exe，无需安装 Python 或数据库。
+
+          首次运行显示 6 个模拟点位；通过“PLC连接”配置 OPC UA，在“点位管理”下载和导入 Excel 模板。
+          配置与 SQLite 历史保存于 gateway-data，退出请使用界面“退出软件”或 ZIP 内“停止软件.cmd”。
+
+          支持最多 1000 点、BOOL/WORD/DWORD/FLOAT、按点位保存策略、最近 7 天历史和按需数据查询。
+          真实 PLC 连接只读；当前查询为本地规则，外部大模型尚未接入。
+
+          本发布已通过 Windows 上真实 EXE 的独立启动、离线界面、6 点采集、Excel 模板、SQLite 持久化、重复启动和正常退出测试。真实 PLC 需现场验收。
+          ZIP 包含第三方许可证及 opcua LGPL 原始源码。SHA256SUMS.txt 可核对下载文件。
+          "@ | Set-Content -LiteralPath $notes -Encoding utf8
+          $assets = @('dist/windows/IndustrialAIGateway.exe', "dist/windows/Industrial_AI_Gateway-v${env:APP_VERSION}-windows-x64.zip", 'dist/windows/SHA256SUMS.txt', 'dist/windows/BUILD_INFO.json', 'dist/windows/WINDOWS_SMOKE_REPORT.json')
+          gh release view $env:GITHUB_REF_NAME *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Release upload failed.' }
+            gh release edit $env:GITHUB_REF_NAME --title "Industrial AI Gateway $env:GITHUB_REF_NAME" --notes-file $notes
+          } else {
+            gh release create $env:GITHUB_REF_NAME @assets --verify-tag --title "Industrial AI Gateway $env:GITHUB_REF_NAME" --notes-file $notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed.' }

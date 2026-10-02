@@ -1,0 +1,3 @@
+# Optional Windows service support. Business dependencies stay unchanged.
+-r requirements.txt
+pywin32==311; sys_platform == "win32"

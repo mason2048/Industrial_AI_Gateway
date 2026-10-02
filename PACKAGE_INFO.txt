@@ -1,0 +1,8 @@
+Industrial AI Gateway 1.2.0
+
+本仓库提供源码和 Windows EXE 构建流程。
+Windows 普通用户请从 GitHub Releases 下载 EXE 或便携 ZIP，无需 Python。
+源码开发/Windows 服务安装需要 Python 3.12，详见 README.md 和 docs/SOURCE_DEPLOYMENT.md。
+公开源码及二进制发行包不包含现场配置、点表、历史数据库、管理口令、证书或私钥。
+首次 EXE 启动使用全新模拟配置和 6 个样本点，无预置历史。
+真实 PLC 连接为只读；外部 AI 模型尚未接入。

@@ -1,0 +1,10 @@
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+opcua==0.98.13
+cryptography>=44,<50
+openpyxl>=3.1,<4
+pandas>=2.2,<3
+python-multipart>=0.0.20,<1
+httpx>=0.28,<1
+pytest>=8,<10
+tzdata>=2025.1
