@@ -15,10 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_frozen_licenses_are_complete_and_verifiable(tmp_path):
     stage = tmp_path / "assets"
     stage.mkdir()
-    (stage / "frontend-placeholder.txt").write_text("preserved")
+    (stage / "frontend-placeholder.txt").write_text("preserved", encoding="utf-8")
     manifest = collect_licenses.collect(ROOT, stage)
-    assert (stage / "frontend-placeholder.txt").read_text() == "preserved"
-    assert json.loads((stage / "LICENSE_MANIFEST.json").read_text()) == manifest
+    assert (stage / "frontend-placeholder.txt").read_text(encoding="utf-8") == "preserved"
+    assert json.loads((stage / "LICENSE_MANIFEST.json").read_text(encoding="utf-8")) == manifest
     packages = {item["name"]: item for item in manifest["packages"]}
     assert set(collect_licenses.RUNTIME_ROOTS) <= packages.keys()
     assert not {"pandas", "numpy", "pytest", "pip"} & packages.keys()
@@ -36,19 +36,19 @@ def test_frozen_licenses_are_complete_and_verifiable(tmp_path):
             assert hashlib.sha256(path.read_bytes()).hexdigest() == file["sha256"]
             assert not Path(file["path"]).is_absolute()
     opcua = stage / "licenses/packages/opcua"
-    assert "Version 3, 29 June 2007" in (opcua / "COPYING.LESSER").read_text()
-    assert "END OF TERMS AND CONDITIONS" in (opcua / "COPYING.GPL").read_text()
-    assert "Version 2.1, February 1999" in (stage / "licenses/runtime/lxml-native/COPYING.LIB").read_text()
+    assert "Version 3, 29 June 2007" in (opcua / "COPYING.LESSER").read_text(encoding="utf-8")
+    assert "END OF TERMS AND CONDITIONS" in (opcua / "COPYING.GPL").read_text(encoding="utf-8")
+    assert "Version 2.1, February 1999" in (stage / "licenses/runtime/lxml-native/COPYING.LIB").read_text(encoding="utf-8")
     assert (stage / "third_party_sources/REBUILD.md").is_file()
     archive = stage / "third_party_sources/opcua-0.98.13.tar.gz"
     with tarfile.open(archive) as contents:
         assert any(member.name.endswith("opcua/client/client.py") for member in contents.getmembers())
-    notices = (stage / "THIRD_PARTY_NOTICES.md").read_text()
+    notices = (stage / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
     assert "LGPL v3" in notices
     if "pyinstaller" in packages:
         assert "pyinstaller" in notices
-    assert "Mozilla Public License Version 2.0" in (stage / "licenses/runtime/certifi/MPL-2.0.txt").read_text()
-    assert "site-packages" not in (stage / "LICENSE_MANIFEST.json").read_text()
+    assert "Mozilla Public License Version 2.0" in (stage / "licenses/runtime/certifi/MPL-2.0.txt").read_text(encoding="utf-8")
+    assert "site-packages" not in (stage / "LICENSE_MANIFEST.json").read_text(encoding="utf-8")
 
 
 def test_collector_refuses_changed_checked_in_license(tmp_path):
