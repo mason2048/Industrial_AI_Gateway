@@ -10,8 +10,8 @@ HEADERS = {"ID":"id", "地址":"address", "名称":"name", "类型":"type", "单
 
 def validate_tags(items):
     tags = [x if isinstance(x, Tag) else Tag.model_validate(x) for x in items]
-    if not 1 <= len(tags) <= 1000:
-        raise ValueError("点位数量必须为1至1000")
+    if not 0 <= len(tags) <= 1000:
+        raise ValueError("点位数量必须为0至1000")
     for key in (lambda t:t.id, lambda t:(t.device,t.name), lambda t:(t.device,t.address)):
         values = [key(t) for t in tags]
         if len(values) != len(set(values)):

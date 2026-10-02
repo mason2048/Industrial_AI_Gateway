@@ -44,7 +44,7 @@ jobs:
         run: |
           python -m pytest -q --disable-warnings tests
           if ($LASTEXITCODE -ne 0) { throw 'Application and packaging tests failed.' }
-          node --test tests/frontend_v11.test.cjs tests/frontend_basic.test.cjs
+          node --test tests/frontend_v11.test.cjs tests/frontend_basic.test.cjs tests/frontend_model.test.cjs
           if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
       - name: Build self-contained Windows x64 program
         shell: pwsh

@@ -435,9 +435,20 @@ def test_point_edit_is_nonblocking_and_old_scan_keeps_definition(db):
     assert gateway.snapshot()["revision"] == revision
     assert gateway.tags[0].revision == 2
     gateway.writer.start()
-    gateway.writer.enqueue(batch(1, old, "sim"))
-    gateway.writer.enqueue(batch(2, gateway.tags, "sim"))
-    assert gateway.writer.stop(3)["drained"]
+    try:
+        assert gateway.writer.enqueue(batch(1, old, "sim"))
+        assert gateway.writer.enqueue(batch(2, gateway.tags, "sim"))
+        # This test verifies committed definition identities, not a three-second
+        # disk deadline. Wait for both real commits before testing clean shutdown.
+        wait_for(lambda: gateway.writer.diagnostics()["saved_batches"] == 2
+                 and gateway.writer.diagnostics()["pending_batches"] == 0,
+                 timeout=STORAGE_COMPLETION_TIMEOUT)
+        state = gateway.writer.diagnostics()
+        assert state["saved_samples"] == 2 and state["dropped_samples"] == 0
+        assert not state["storage_error"] and not state["retrying"]
+    finally:
+        stopped = gateway.writer.stop(STORAGE_COMPLETION_TIMEOUT)
+    assert stopped["drained"] and stopped["storage_stopped"]
     versions = history.variables()
     assert {(row["name"], row["tag_revision"], row["active"]) for row in versions} == {
         ("Point1", 1, False), ("New name", 2, True)}

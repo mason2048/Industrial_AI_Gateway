@@ -24,8 +24,13 @@ def source(tmp_path):
     shutil.copy2(ROOT / "config/config.example.json", root / "config/config.example.json")
     shutil.copy2(ROOT / "LICENSE", root / "LICENSE")
     (root / "config/config.json").write_text('{"username":"field-private-token"}')
+    (root / "config/ai.json").write_text('{"model":"field-private-token"}')
     (root / "data").mkdir()
     (root / "data/history.db").write_bytes(b"field-private-token")
+    (root / "data/ai-secrets").mkdir()
+    (root / "data/ai-secrets/key-1.json").write_text('{"api_key":"field-private-token"}')
+    (root / "docs").mkdir()
+    (root / "docs/MODEL_SETUP.md").write_text("Public model setup instructions.")
     (root / "frontend/private.txt").write_text("field-private-token")
     return root
 
@@ -118,6 +123,7 @@ def test_portable_contains_exe_legal_resources_and_scripts_without_runtime(sourc
         prefix = "Industrial_AI_Gateway/"
         names = [name.removeprefix(prefix) for name in archive.namelist()]
         assert "IndustrialAIGateway.exe" in names
+        assert "docs/MODEL_SETUP.md" in names
         assert "停止软件.cmd" in names and "打开数据目录.cmd" in names
         assert "third_party_sources/opcua-0.98.13.tar.gz" in names
         assert not any(name.startswith(("data/", "config/", "frontend/")) for name in names)

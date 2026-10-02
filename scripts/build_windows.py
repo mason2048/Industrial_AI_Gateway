@@ -173,7 +173,11 @@ def quick_start(version: str) -> str:
 
 当前版本支持最多 1000 点、BOOL/WORD/DWORD/FLOAT、按点位保存间隔与变化阈值、
 SQLite 最近 7 天历史及按需数据查询。实际 PLC 连接只读；真实 PLC 写入未开放。
-当前查询使用本地规则，尚未接入外部大模型，不会在后台自动发送工业数据。
+默认查询使用离线本地规则；“模型设置”可配置 Ollama、LM Studio 或 OpenAI兼容服务。
+在“模型设置”填写管理口令、服务地址和模型名称，先测试再保存；回到“按需数据查询”提问。
+只有测试连接或提交问题时才调用模型，不自动分析；模型只能读取有限的当前/变化历史证据。
+模型运行软件和权重需另行安装，本发行包不包含。Ollama每次请求结束后请求卸载模型。
+完整配置、可选本地模型与内存估算见 docs/MODEL_SETUP.md。
 真空浮点显示支持 5 位小数；实际采集精度以 PLC 与 OPC UA 数据类型为准。
 
 发布包保留第三方许可证与 opcua LGPL 原始源码，见 THIRD_PARTY_NOTICES.md、
@@ -208,6 +212,9 @@ def create_portable(root: Path, assets: Path, executable: Path, output: Path, ve
                 entries[name] = _public_file(assets, name).read_bytes()
     if (root / "docs/EXE_BUILD.md").is_file():
         entries["EXE_BUILD.md"] = _public_file(root, "docs/EXE_BUILD.md").read_bytes()
+    for name in ("docs/MODEL_SETUP.md", "docs/WINDOWS_DEPLOYMENT.md"):
+        if (root / name).is_file():
+            entries[name] = _public_file(root, name).read_bytes()
     manifest = {"version": version, "target": "Windows x64", "requires_python_install": False,
                 "contains_field_data": False,
                 "files": {name: {"size": len(value), "sha256": hashlib.sha256(value).hexdigest()}
