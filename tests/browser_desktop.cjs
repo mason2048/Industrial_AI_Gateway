@@ -270,8 +270,18 @@ async function main() {
       await page.getByLabel('回答方式', { exact: true }).selectOption('ollama');
       await page.getByLabel('模型服务地址', { exact: true }).fill(mock.base);
       await page.getByLabel('模型名称', { exact: true }).fill('qa-ollama');
+      await page.getByText('高级参数（超时、回答长度、随机程度）', { exact: true }).click();
       await page.getByLabel('等待回答的最长时间（秒）', { exact: true }).fill('10');
       await page.getByLabel('回答长度上限（Token）', { exact: true }).fill('128');
+      await page.getByLabel('等待回答的最长时间（秒）', { exact: true }).fill('4');
+      await page.getByText('高级参数（超时、回答长度、随机程度）', { exact: true }).click();
+      assert.equal(await page.locator('.model-advanced').evaluate(element => element.open), false);
+      await page.getByRole('button', { name: '保存模型设置', exact: true }).click();
+      assert.equal(await page.locator('.model-advanced').evaluate(element => element.open), true,
+        'Invalid hidden advanced inputs must expand their section');
+      assert.equal(await page.getByLabel('等待回答的最长时间（秒）', { exact: true }).evaluate(element => document.activeElement === element), true);
+      assert.deepEqual(await fetch(base + '/api/ai/config').then(response => response.json()), before);
+      await page.getByLabel('等待回答的最长时间（秒）', { exact: true }).fill('10');
       await wait(350); assert.equal(mock.calls.length, 0, 'Opening model settings must not trigger model inference');
       const tested = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/test');
       await page.getByRole('button', { name: '测试候选模型', exact: true }).click();
@@ -281,6 +291,10 @@ async function main() {
       assert.equal(mock.calls[0].evidence, undefined);
       assert.equal(mock.calls[0].body.messages.some(message => message.content.includes('read_only_evidence')), false);
       assert.deepEqual(await fetch(base + '/api/ai/config').then(response => response.json()), before);
+      await page.getByLabel('模型名称', { exact: true }).fill('changed-after-test');
+      await page.getByText(/测试不会保存候选设置/).waitFor({ state: 'hidden' });
+      assert.equal(mock.calls.length, 1, 'Changing a tested candidate must invalidate its result without calling the model');
+      await page.getByLabel('模型名称', { exact: true }).fill('qa-ollama');
       const saved = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/config' && response.request().method() === 'POST');
       await page.getByRole('button', { name: '保存模型设置', exact: true }).click();
       const applied = await saved; assert.equal(applied.status(), 200);
@@ -376,6 +390,8 @@ async function main() {
       await policy().selectOption('interval');
       await interval().fill('1');
       await dialog().getByLabel('定时保存间隔（秒，留空继承全局）', { exact: true }).fill('0.2');
+      await dialog().getByLabel('显示小数位数（0–10位）', { exact: true }).fill('6');
+      await dialog().getByLabel('变化保存阈值（绝对差值）', { exact: true }).fill('0.000001');
       await dialog().getByLabel('记录变化事件', { exact: true }).selectOption('false');
       await capture('11-point-ai-policy-desktop');
       let applied = page.waitForResponse(response => new URL(response.url()).pathname === '/api/tags'
@@ -386,12 +402,15 @@ async function main() {
       let stored = await fetch(base + '/api/tags').then(response => response.json()).then(items => items.find(item => item.id === tag.id));
       assert.equal(stored.ai_history_mode, 'interval'); assert.equal(stored.ai_history_interval_seconds, 1);
       assert.equal(stored.history_interval_seconds, .2); assert.equal(stored.record_changes, false);
+      assert.equal(stored.precision, 6); assert.equal(stored.threshold, .000001);
+      const configuredRevision = stored.revision;
       assert.equal(mock.calls.length, count, 'Editing point policies must not call a model');
       await page.reload(); await selectPage(page, '点位管理'); await row().waitFor();
       const pin = (await fs.readFile(path.join(root, 'data/operator_pin.txt'), 'utf8')).trim();
       await page.getByLabel('本机管理口令', { exact: true }).fill(pin);
       await row().getByRole('button', { name: '编辑', exact: true }).click();
       assert.equal(await policy().inputValue(), 'interval'); assert.equal(await interval().inputValue(), '1');
+      assert.equal(await dialog().getByLabel('显示小数位数（0–10位）', { exact: true }).inputValue(), '6');
       await page.setViewportSize({ width: 390, height: 844 });
       await policy().scrollIntoViewIfNeeded();
       assert.equal(await policy().isVisible(), true); assert.equal(await interval().isVisible(), true);
@@ -455,6 +474,35 @@ async function main() {
       assert.ok(evidence.history_items.length > 0, 'Previously stored history must remain readable after stopping new saves');
       assert.ok(evidence.history_items.every(item => item.ai_history_mode === 'interval'));
       assert.deepEqual(evidence, mock.calls.at(-1).evidence);
+      assert.equal(evidence.current_items.find(item => item.id === tag.id).precision, 6);
+      await selectPage(page, '实时监控');
+      const reading = page.locator('table tbody tr').filter({ hasText: tag.name }).locator('.reading');
+      assert.match(await reading.innerText(), /^-?\d+\.\d{6}$/);
+      await selectPage(page, '历史曲线');
+      const catalog = await fetch(base + '/api/history/variables?source=simulation').then(response => response.json());
+      const definition = catalog.items.find(item => item.tag_id === tag.id && item.tag_revision === configuredRevision);
+      assert.ok(definition, 'Six-decimal historical definition must remain available');
+      await page.getByLabel('设备', { exact: true }).selectOption(definition.device);
+      await page.getByLabel('变量 / 历史版本', { exact: true }).selectOption(JSON.stringify([
+        definition.source, definition.connection_id, definition.tag_id, definition.tag_revision,
+        definition.device, definition.name, definition.unit]));
+      // The browser uses Asia/Shanghai on both macOS and Windows; construct its
+      // local datetime rather than using the CI host timezone or minute floor.
+      await page.getByLabel('结束时间', { exact: true }).fill(await page.evaluate(() => {
+        const date = new Date(Date.now() + 120000);
+        return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+      }));
+      const plotted = page.waitForResponse(response => new URL(response.url()).pathname === '/api/history/series'
+        && new URL(response.url()).searchParams.get('tag_revision') === String(configuredRevision));
+      await page.getByRole('button', { name: '查询', exact: true }).click();
+      const curve = await plotted; assert.equal(curve.status(), 200);
+      const groups = (await curve.json()).series; assert.ok(groups.length > 0 && groups.every(group => group.precision === 6));
+      await page.locator('.chart svg').waitFor();
+      const labels = (await page.locator('.chart svg text').allTextContents()).slice(1, 5);
+      assert.equal(new Set(labels).size, 4);
+      assert.ok(labels.some(label => /^-?\d+\.\d{6,}$/.test(label)), 'Six-decimal chart precision must reach the rendered axis');
+      assert.equal(mock.calls.length, count + 3, 'Realtime and history displays must not call a model');
+      await capture('11-six-decimal-history');
     });
     await step('12 local rules restore without model calls and PLC clear options are explicit', async () => {
       await selectPage(page, '模型设置');

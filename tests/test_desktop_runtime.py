@@ -220,7 +220,11 @@ def test_desktop_subprocess_starts_six_points_reuses_instance_and_stops_cleanly(
         assert json.loads((tmp_path / "data/gateway.pid").read_text(encoding="utf-8"))["token"] == owner["token"]
         stop = subprocess.run([*command, "--stop"], capture_output=True, text=True, cwd=ROOT, timeout=40)
         assert stop.returncode == 0 and json.loads(stop.stdout)["stopped"], stop.stderr
-        assert child.wait(timeout=5) == 0, child.stdout.read()
+        assert child.wait(timeout=5) == 0, {
+            "output": child.stdout.read(),
+            "desktop_log": (tmp_path / "logs/desktop.log").read_text(encoding="utf-8"),
+            "gateway_log": (tmp_path / "data/logs/gateway.log").read_text(encoding="utf-8"),
+        }
         assert not is_running(tmp_path)
         assert not (tmp_path / "data/desktop-instance.json").exists()
         assert not (tmp_path / "data/gateway.pid").exists()

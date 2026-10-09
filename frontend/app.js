@@ -13,13 +13,38 @@ const localTime = value => value ? new Date(value).toLocaleString('zh-CN', { hou
 const seriesGroups = data => data?.series || (data?.items ? [{ ...data, items: data.items }] : []);
 
 const HistoryChart = {
-  props: ['items', 'unit', 'large', 'start', 'end'],
+  props: ['items', 'unit', 'large', 'start', 'end', 'precision'],
   setup(props) {
-    const chart = computed(() => IAGHistory.buildSeriesChart(props.items, props.start, props.end));
+    const chart = computed(() => {
+      const data = IAGHistory.buildSeriesChart(props.items, props.start, props.end);
+      if (!data) return null;
+      let digits = Number.isInteger(props.precision) ? Math.max(0, Math.min(10, props.precision)) : 5;
+      let labels = data.ticks.map(tick => fmt(tick.value, digits));
+      // Narrow vacuum ranges need enough axis digits to distinguish adjacent
+      // ticks even when the configured value display uses fewer decimal places.
+      while (new Set(labels).size < labels.length && digits < 10) {
+        digits++;
+        labels = data.ticks.map(tick => fmt(tick.value, digits));
+      }
+      if (new Set(labels).size < labels.length || labels.some(label => label.length > 16)) {
+        let exponentDigits = Math.max(6, digits);
+        do {
+          labels = data.ticks.map(tick => tick.value.toExponential(exponentDigits));
+          exponentDigits++;
+        } while (new Set(labels).size < labels.length && exponentDigits <= 16);
+      }
+      const axisLeft = Math.min(180, Math.max(62, Math.max(...labels.map(label => label.length)) * 6.2 + 20));
+      const adjustX = x => axisLeft + (x - 62) * (566 - axisLeft) / 504;
+      return { ...data, axisLeft,
+        ticks: data.ticks.map((tick, index) => ({ ...tick, label: labels[index] })),
+        segments: data.segments.map(segment => segment.map(point => ({ ...point, x: adjustX(point.x) }))),
+        ranges: data.ranges.map(range => ({ ...range, x: adjustX(range.x) })),
+        times: data.times.map(tick => ({ ...tick, x: adjustX(tick.x) })) };
+    });
     return { chart, fmt, points: segment => segment.map(point => `${point.x},${point.y}`).join(' '),
       tickTime: timestamp => new Date(timestamp).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) };
   },
-  template: `<div class="chart" :class="{large}"><div v-if="!chart" class="empty">所选范围暂无有效历史数据</div><svg v-else viewBox="0 0 600 210" role="img" :aria-label="'历史曲线 '+(unit||'')"><text x="12" y="13">{{unit}}</text><g v-for="tick in chart.ticks"><line x1="62" :y1="tick.y" x2="566" :y2="tick.y" stroke="#e8eef1" stroke-dasharray="3 4"/><text x="54" :y="tick.y+3" text-anchor="end">{{fmt(tick.value)}}</text></g><g v-for="range in chart.ranges"><line :x1="range.x" :x2="range.x" :y1="range.y1" :y2="range.y2" stroke="#6cbcae" stroke-width="2"/></g><g v-for="segment in chart.segments"><polyline :points="points(segment)" fill="none" stroke="#329c8a" stroke-width="2.2" stroke-linejoin="round"/><circle v-if="segment.length===2" :cx="segment[0].x" :cy="segment[0].y" r="2.5" fill="#329c8a"/></g><g v-for="tick in chart.times"><text :x="tick.x" y="198" text-anchor="middle">{{tickTime(tick.timestamp)}}</text></g></svg></div>`
+  template: `<div class="chart" :class="{large}"><div v-if="!chart" class="empty">所选范围暂无有效历史数据</div><svg v-else viewBox="0 0 600 210" role="img" :aria-label="'历史曲线 '+(unit||'')"><text x="12" y="13">{{unit}}</text><g v-for="tick in chart.ticks"><line :x1="chart.axisLeft" :y1="tick.y" x2="566" :y2="tick.y" stroke="#e8eef1" stroke-dasharray="3 4"/><text :x="chart.axisLeft-8" :y="tick.y+3" text-anchor="end">{{tick.label}}</text></g><g v-for="range in chart.ranges"><line :x1="range.x" :x2="range.x" :y1="range.y1" :y2="range.y2" stroke="#6cbcae" stroke-width="2"/></g><g v-for="segment in chart.segments"><polyline :points="points(segment)" fill="none" stroke="#329c8a" stroke-width="2.2" stroke-linejoin="round"/><circle v-if="segment.length===2" :cx="segment[0].x" :cy="segment[0].y" r="2.5" fill="#329c8a"/></g><g v-for="tick in chart.times"><text :x="tick.x" y="198" text-anchor="middle">{{tickTime(tick.timestamp)}}</text></g></svg></div>`
 };
 
 createApp({
@@ -46,6 +71,11 @@ createApp({
     const modelConfig = ref({ ...modelDefaults, api_key_set: false }), modelLoaded = ref(false);
     const modelForm = ref({ ...modelDefaults, api_key: '', clear_api_key: false }), modelETag = ref(null), modelDraftETag = ref(null);
     const modelDraftInitialized = ref(false), modelTest = ref(null);
+    let modelTestEpoch = 0;
+    watch(modelForm, () => {
+      modelTestEpoch += 1;
+      modelTest.value = null;
+    }, { deep: true, flush: 'sync' });
     const modelProviders = { local_rules: '本地规则统计', ollama: 'Ollama模型', openai_compatible: 'OpenAI兼容模型' };
     const modelLabel = computed(() => !modelLoaded.value ? '等待读取模型配置'
       : `${modelProviders[modelConfig.value.provider] || '未知服务'}${modelConfig.value.model && modelConfig.value.provider !== 'local_rules' ? ' · ' + modelConfig.value.model : ''}`);
@@ -57,7 +87,6 @@ createApp({
     const shutdownRequested = ref(false);
     const editFields = [{ key: 'name', label: '变量名称', required: true },
       { key: 'address', label: 'PLC原始地址（用于识别）', required: true, identity: true }, { key: 'device', label: '设备', required: true, identity: true }, { key: 'unit', label: '单位' },
-      { key: 'precision', label: '显示小数位数（默认5位）', type: 'number', min: 0, max: 10, step: 1, required: true },
       { key: 'ai_description', label: 'AI地址注释' }, { key: 'node_id', label: 'OPC UA NodeId（实际读取地址）', identity: true }];
     const pageTitle = computed(() => nav.find(item => item.id === page.value)?.title);
     const descriptions = { overview: '按设备选择关键参数，查看完整时间范围的趋势。', connection: '在这里修改通信地址、轮询读取周期、批次和全局历史策略。',
@@ -209,8 +238,10 @@ createApp({
     async function testModel() {
       await action(async () => {
         modelTest.value = null;
-        modelTest.value = await api.request('/api/ai/test', { ...json('POST', candidateModel(), managementHeaders(managerPin.value)),
-          timeout: (Number(modelForm.value.timeout_seconds) || 60) * 1000 + 10000 });
+        const candidate = candidateModel(), testEpoch = ++modelTestEpoch;
+        const result = await api.request('/api/ai/test', { ...json('POST', candidate, managementHeaders(managerPin.value)),
+          timeout: (candidate.timeout_seconds || 60) * 1000 + 10000 });
+        if (testEpoch === modelTestEpoch) modelTest.value = result;
       });
     }
     async function saveConnection() {

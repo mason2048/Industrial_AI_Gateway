@@ -174,6 +174,16 @@ class LocalDataProvider:
                 "summary_scope": "all_saved_samples_in_range"}
 
     @staticmethod
+    def _format_numeric(value, precision=5):
+        # Precision controls display only; very small nonzero readings must not
+        # become an apparent zero when their magnitude is below that precision.
+        if not isinstance(precision, int) or isinstance(precision, bool) or not 0 <= precision <= 10:
+            precision = 5
+        if value != 0 and abs(value) < 10 ** -precision:
+            return f"{value:.{precision}e}"
+        return f"{value:.{precision}f}"
+
+    @staticmethod
     def _current_answer(current, variable):
         items = [x for x in current["items"] if not variable or x["name"] == variable]
         lines = []
@@ -185,7 +195,7 @@ class LocalDataProvider:
                 elif item["type"] in ("WORD", "DWORD"):
                     formatted = str(int(value))
                 else:
-                    formatted = f"{value:.{item.get('precision', 5)}f}"
+                    formatted = LocalDataProvider._format_numeric(value, item.get("precision", 5))
                 lines.append(f"{item['device']}/{item['name']}：{formatted} {item['unit']}；采集时间 {item.get('timestamp')}。")
             else:
                 lines.append(f"{item['device']}/{item['name']}：当前数据不可用（{item['quality']}），请检查通信。")
@@ -248,7 +258,9 @@ class LocalDataProvider:
         summaries = [s for s in data["summary"] if s["good_samples"]]
         lines = []
         for s in summaries:
-            lines.append(f"{s['device']}/{s['name']}（定义版本{s.get('tag_revision', 1)}）：保存{s['samples']}条，其中有效{s['good_samples']}条；最小{s['minimum']:.6g}、最大{s['maximum']:.6g}、保存样本均值{s['mean']:.6g} {s['unit']}。")
+            minimum, maximum, mean = (self._format_numeric(s[field], s.get("precision", 5))
+                                      for field in ("minimum", "maximum", "mean"))
+            lines.append(f"{s['device']}/{s['name']}（定义版本{s.get('tag_revision', 1)}）：保存{s['samples']}条，其中有效{s['good_samples']}条；最小{minimum}、最大{maximum}、保存样本均值{mean} {s['unit']}。")
         if not lines: lines = ["所选范围没有有效历史数据。请检查保存开关、采集质量和时间范围。"]
         return {"provider":"local_rules","query_type":"history","answer":"\n".join(lines),"device":request.device,"variable":variable,
                 "source":current["mode"],"connection_id":connection_id,"start":data["start"],"end":data["end"],"summary":data["summary"],

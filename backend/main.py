@@ -95,6 +95,13 @@ def create_app(root=ROOT):
                     except Exception as exc:
                         logger.error("Acquisition shutdown failed: %s", redactor.text(exc))
                         result = {"collector_stopped": False, "storage_stopped": False, "drained": False}
+                    # Signal operations early so acquisition can drain promptly,
+                    # then let a backup already in progress use the remaining
+                    # shared allowance before reporting an incomplete shutdown.
+                    try:
+                        await asyncio.to_thread(operations.stop, timeout=max(0, deadline-time.monotonic()))
+                    except Exception as exc:
+                        logger.error("Operational shutdown failed: %s", redactor.text(exc))
                     workers = [gateway.thread, gateway.writer._thread, gateway.writer._cleanup_thread,
                                operations.thread, operations.backup_thread]
                     result["operations_stopped"] = not any(t and t.is_alive() for t in workers[3:])
