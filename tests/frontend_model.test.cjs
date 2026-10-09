@@ -108,9 +108,60 @@ test('candidate test contains no device data or saved mutation and retains its k
     assert.equal(request.options.headers['X-Operator-Pin'], 'operator');
     assert.equal(state.modelForm.value.api_key, 'test-secret');
     assert.equal(state.modelConfig.value.provider, 'local_rules');
-    await state.navigate('ai'); assert.equal(state.modelForm.value.api_key, '');
     assert.equal(status === 200 ? state.modelTest.value.success : state.modelTest.value, status === 200 ? true : null);
+    await state.navigate('ai'); assert.equal(state.modelForm.value.api_key, '');
+    assert.equal(state.modelTest.value, null);
   }
+});
+
+test('changing any candidate model parameter invalidates its successful test without clearing the key or calling a model', async () => {
+  const calls = [];
+  const state = appFixture(async (url, options) => {
+    calls.push({ url, options });
+    if (url === '/api/ai/config') return response(config({ provider: 'ollama', model: 'working-model' }));
+    if (url === '/api/ai/test') return response({ success: true, model: JSON.parse(options.body).model, message: '测试通过' });
+    throw new Error('Unexpected request: ' + url);
+  });
+  state.managerPin.value = 'operator'; await state.navigate('model');
+  state.modelForm.value.api_key = 'candidate-secret';
+  for (const [field, value] of Object.entries({ provider: 'openai_compatible', base_url: 'http://127.0.0.1:1234/v1',
+    model: 'nonexistent-model', timeout_seconds: 120, max_output_tokens: 2048, temperature: 0.5,
+    api_key: 'replacement-secret', clear_api_key: true })) {
+    await state.testModel();
+    assert.equal(state.modelTest.value.success, true);
+    const count = calls.length, key = state.modelForm.value.api_key;
+    state.modelForm.value[field] = value;
+    assert.equal(state.modelTest.value, null, `Changing ${field} must immediately invalidate the old result`);
+    assert.equal(calls.length, count, `Changing ${field} must not request inference or save settings`);
+    assert.equal(state.modelForm.value.api_key, field === 'api_key' ? value : key,
+      'Invalidating a test must preserve the key entered by the user');
+  }
+});
+
+test('a pending model test cannot attach an old success after its candidate changes and changes back', async () => {
+  const calls = [];
+  let resolveTest;
+  const state = appFixture(async (url, options) => {
+    calls.push({ url, options });
+    if (url === '/api/ai/config') return response(config({ provider: 'ollama', model: 'working-model' }));
+    if (url === '/api/ai/test') return await new Promise(resolve => { resolveTest = resolve; });
+    throw new Error('Unexpected request: ' + url);
+  });
+  state.managerPin.value = 'operator'; await state.navigate('model');
+  state.modelForm.value.api_key = 'candidate-secret';
+  const pending = state.testModel();
+  assert.equal(state.busy.value, true); assert.equal(typeof resolveTest, 'function');
+  state.modelForm.value.model = 'different-model'; state.modelForm.value.model = 'working-model';
+  resolveTest(response({ success: true, model: 'working-model', message: '测试通过' }));
+  await pending;
+  assert.equal(state.modelTest.value, null, 'A response for an invalidated candidate must be discarded');
+  assert.equal(state.modelForm.value.api_key, 'candidate-secret');
+  assert.deepEqual(calls.map(call => call.url), ['/api/ai/config', '/api/ai/test']);
+  assert.equal(state.busy.value, false);
+  const repeated = state.testModel();
+  resolveTest(response({ success: true, model: 'working-model', message: '测试通过' }));
+  await repeated;
+  assert.equal(state.modelTest.value.success, true, 'Testing the unchanged current candidate can succeed normally');
 });
 
 test('model query requires a PIN, permits a slow response, and surfaces failures without stale answers', async () => {

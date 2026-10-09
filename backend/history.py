@@ -137,6 +137,8 @@ class History:
                 FROM history_data WHERE {clause} ORDER BY timestamp,id LIMIT ? OFFSET ?""",
                 [*params, limit, offset])]
             summary = [dict(x) for x in conn.execute(f"""SELECT tag_id,device,name,unit,data_type,source,connection_id,tag_revision,
+                COALESCE((SELECT json_extract(d.definition, '$.precision') FROM tag_definitions d
+                          WHERE d.tag_id=history_data.tag_id AND d.revision=history_data.tag_revision), 5) AS precision,
                 COUNT(*) samples, SUM(CASE WHEN quality='Good' THEN 1 ELSE 0 END) good_samples,
                 MIN(CASE WHEN quality='Good' THEN value END) minimum,
                 MAX(CASE WHEN quality='Good' THEN value END) maximum,
@@ -197,6 +199,8 @@ class History:
                 FROM bucketed
             )
             SELECT {identity},bucket,COUNT(*) count,
+                COALESCE((SELECT json_extract(d.definition, '$.precision') FROM tag_definitions d
+                          WHERE d.tag_id=ranked.tag_id AND d.revision=ranked.tag_revision), 5) AS precision,
                 MAX(CASE WHEN first_rank=1 AND quality='Good' THEN value END) first,
                 MAX(CASE WHEN last_rank=1 AND quality='Good' THEN value END) last,
                 MIN(CASE WHEN quality='Good' THEN value END) minimum,
@@ -212,7 +216,7 @@ class History:
         for row in rows:
             key = tuple(row[field] for field in fields)
             if key not in grouped:
-                grouped[key] = {**{field: row[field] for field in fields}, "items": [
+                grouped[key] = {**{field: row[field] for field in fields}, "precision": row["precision"], "items": [
                     {"timestamp": iso(begin + index * width), "end": iso(begin + (index + 1) * width),
                      "first": None, "last": None, "minimum": None, "maximum": None,
                      "quality": "NoData", "count": 0} for index in range(buckets)]}
