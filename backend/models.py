@@ -13,6 +13,8 @@ class Tag(BaseModel):
     unit: str = Field(default="-", max_length=30)
     permission: Literal["READ", "WRITE"] = "READ"
     ai_description: str = Field(default="", max_length=500)
+    ai_history_mode: Literal["changes", "interval"] = "changes"
+    ai_history_interval_seconds: float | None = Field(default=None, gt=0, le=604800, allow_inf_nan=False)
     save: bool = True
     threshold: float = Field(default=0, ge=0, allow_inf_nan=False)
     history_interval_seconds: float | None = Field(default=None, gt=0, le=604800, allow_inf_nan=False)

@@ -57,13 +57,11 @@ createApp({
     const shutdownRequested = ref(false);
     const editFields = [{ key: 'name', label: '变量名称', required: true },
       { key: 'address', label: 'PLC原始地址（用于识别）', required: true, identity: true }, { key: 'device', label: '设备', required: true, identity: true }, { key: 'unit', label: '单位' },
-      { key: 'threshold', label: '变化保存阈值（绝对差值）', type: 'number', min: 0, required: true },
-      { key: 'history_interval_seconds', label: '定时保存间隔（秒，留空继承全局）', type: 'number', min: 0.001, placeholder: '留空使用全局默认值' },
       { key: 'precision', label: '显示小数位数（默认5位）', type: 'number', min: 0, max: 10, step: 1, required: true },
       { key: 'ai_description', label: 'AI地址注释' }, { key: 'node_id', label: 'OPC UA NodeId（实际读取地址）', identity: true }];
     const pageTitle = computed(() => nav.find(item => item.id === page.value)?.title);
     const descriptions = { overview: '按设备选择关键参数，查看完整时间范围的趋势。', connection: '在这里修改通信地址、轮询读取周期、批次和全局历史策略。',
-      tags: '管理变量定义、读取权限与历史保存策略。', realtime: '查看最新设备数据、通讯质量与数据时间。',
+      tags: '管理变量定义、本地历史保存与提问时的AI取数方式。', realtime: '查看最新设备数据、通讯质量与数据时间。',
       history: '按连接和变量版本追溯历史，保留退役点位记录。', ai: '只在提交问题后查询所选设备数据。',
       model: '选择本地规则、本机模型或兼容API，测试后保存。', diagnostics: '检查采集、历史存储、队列和磁盘状态。' };
     const pageDescription = computed(() => page.value === 'ai' ? `${descriptions.ai} 当前：${modelLabel.value}。` : descriptions[page.value]);
@@ -80,6 +78,12 @@ createApp({
     const filteredTags = computed(() => tags.value.filter(matches)), tagPages = computed(() => Math.max(1, Math.ceil(filteredTags.value.length / 50)));
     const pagedTags = computed(() => filteredTags.value.slice((tagPage.value - 1) * 50, tagPage.value * 50));
     const tagRowNumber = index => (tagPage.value - 1) * 50 + index + 1;
+    const aiHistoryLabel = tag => tag.ai_history_mode === 'interval' ? '按时间间隔取样' : '按变化阈值筛选';
+    const aiHistoryDetail = tag => {
+      if (tag.ai_history_mode !== 'interval') return tag.type === 'BOOL' ? '按状态变化 · 保留基准与质量变化' : `绝对差值阈值 ${tag.threshold ?? 0}`;
+      const interval = tag.ai_history_interval_seconds ?? tag.history_interval_seconds ?? config.value.heartbeat_seconds ?? 1800;
+      return `${tag.ai_history_interval_seconds == null ? '继承保存间隔 · ' : ''}${interval}秒 · 从已存记录取样`;
+    };
     const filteredCurrent = computed(() => current.value.items.filter(matches));
     const currentPages = computed(() => Math.max(1, Math.ceil(filteredCurrent.value.length / 50)));
     const pagedCurrent = computed(() => filteredCurrent.value.slice((tagPage.value - 1) * 50, tagPage.value * 50));
@@ -239,9 +243,9 @@ createApp({
     }
     async function editTag(tag) {
       editingOriginal.value = tag?.id || null; editingETag.value = tagETag.value;
-      editing.value = tag ? { history_interval_seconds: null, precision: 5, record_changes: true, ...tag } : { id: null, address: '', name: '',
+      editing.value = tag ? { history_interval_seconds: null, precision: 5, record_changes: true, ai_history_mode: 'changes', ai_history_interval_seconds: null, ...tag } : { id: null, address: '', name: '',
         device: devices.value[0] || '', type: 'FLOAT', unit: '-', permission: 'READ', ai_description: '', save: true, threshold: 0, node_id: '',
-        history_interval_seconds: null, precision: 5, record_changes: false };
+        history_interval_seconds: null, precision: 5, record_changes: false, ai_history_mode: 'changes', ai_history_interval_seconds: null };
       modalError.value = '';
       if (!tag) await allocateTagId();
     }
@@ -277,7 +281,15 @@ createApp({
         if (!Number.isSafeInteger(Number(editing.value?.id)) || Number(editing.value?.id) < 1) {
           throw new Error('尚未获取新点位ID，请点击“重新获取ID”后再保存。草稿已保留。');
         }
+        const aiIntervalInput = editing.value.ai_history_interval_seconds;
+        const aiInterval = aiIntervalInput == null || String(aiIntervalInput).trim() === '' ? null : Number(aiIntervalInput);
+        if (aiInterval !== null && (!Number.isFinite(aiInterval) || aiInterval < 0.001 || aiInterval > 604800)) {
+          throw new Error('AI取样间隔需为0.001至604800秒的数字，或留空继承保存间隔。草稿已保留。');
+        }
+        const aiMode = editing.value.ai_history_mode ?? 'changes';
+        if (!['changes', 'interval'].includes(aiMode)) throw new Error('请选择有效的AI历史取数方式。草稿已保留。');
         const tag = { ...editing.value, id: Number(editing.value.id), threshold: Number(editing.value.threshold), precision: Number(editing.value.precision),
+          ai_history_mode: aiMode, ai_history_interval_seconds: aiInterval,
           history_interval_seconds: editing.value.history_interval_seconds === '' || editing.value.history_interval_seconds == null
             ? null : Number(editing.value.history_interval_seconds) };
         const next = editingOriginal.value ? tags.value.map(item => item.id === editingOriginal.value ? tag : item) : [...tags.value, tag];
@@ -389,7 +401,7 @@ createApp({
       aiForm, aiResult, aiStatus, editing, editingOriginal, modalError, importPreview, writeTag, writePin, writeValue, writeProposal, writeText,
       modelConfig, modelForm, modelLoaded, modelLabel, usesModel, remoteModel, modelTest, modelDraftInitialized,
       connectionTest, validation, diagnostics, readiness, editFields, pageTitle, pageDescription, devices, keySensors, filteredTags, pagedTags,
-      tagPages, tagRowNumber, pagedCurrent, currentPages, canWrite, fmt, localTime, variableKey: IAGHistory.variableKey, variableLabel,
+      tagPages, tagRowNumber, aiHistoryLabel, aiHistoryDetail, pagedCurrent, currentPages, canWrite, fmt, localTime, variableKey: IAGHistory.variableKey, variableLabel,
       navigate, refresh, saveConnection, reloadConnection, testConnection, validateTags, importTags, applyImport, editTag, copyTag, allocateTagId, reloadEditing, saveTag, removeTag,
       shutdownGateway, shutdownRequested,
       selectModelProvider, reloadModel, saveModel, testModel,

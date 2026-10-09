@@ -186,7 +186,7 @@ async function main() {
       const file = path.join(root, 'downloaded-template.xlsx'); await download.saveAs(file);
       const xml = worksheetXml(await fs.readFile(file));
       assert.equal((xml.match(/<row\b/g) || []).length, 1, 'Template must contain no field or demo point rows');
-      for (const column of ['NodeId', 'AI描述', '保存间隔秒', '小数位数', '记录变化']) {
+      for (const column of ['NodeId', 'AI描述', '保存间隔秒', '小数位数', '记录变化', 'AI取数方式', 'AI取数间隔秒']) {
         const escaped = [...column].map(character => character.charCodeAt(0) > 127
           ? `&#${character.charCodeAt(0)};` : character).join('');
         assert.ok(xml.includes(column) || xml.includes(escaped), 'Missing template column ' + column);
@@ -363,7 +363,101 @@ async function main() {
       assert.equal(await page.getByLabel('API Key（可选）', { exact: true }).inputValue(), '');
       assert.equal(config.api_key_set, true);
     });
-    await step('11 local rules restore without model calls and PLC clear options are explicit', async () => {
+    await step('11 point AI policies are visible, persist independently, and apply only when querying history', async () => {
+      const count = mock.calls.length;
+      await selectPage(page, '点位管理');
+      const tags = await fetch(base + '/api/tags').then(response => response.json());
+      const tag = tags.find(item => item.id === 1);
+      const row = () => page.locator('table tbody tr').filter({ hasText: tag.name });
+      const dialog = () => page.getByRole('dialog', { name: '编辑点位' });
+      const policy = () => dialog().getByLabel('AI历史取数方式', { exact: true });
+      const interval = () => dialog().getByLabel('AI取样间隔（秒，留空继承保存间隔）', { exact: true });
+      await row().getByRole('button', { name: '编辑', exact: true }).click();
+      await policy().selectOption('interval');
+      await interval().fill('1');
+      await dialog().getByLabel('定时保存间隔（秒，留空继承全局）', { exact: true }).fill('0.2');
+      await dialog().getByLabel('记录变化事件', { exact: true }).selectOption('false');
+      await capture('11-point-ai-policy-desktop');
+      let applied = page.waitForResponse(response => new URL(response.url()).pathname === '/api/tags'
+        && response.request().method() === 'PUT');
+      await dialog().getByRole('button', { name: '保存点位', exact: true }).click();
+      assert.equal((await applied).status(), 200);
+      await dialog().waitFor({ state: 'hidden' });
+      let stored = await fetch(base + '/api/tags').then(response => response.json()).then(items => items.find(item => item.id === tag.id));
+      assert.equal(stored.ai_history_mode, 'interval'); assert.equal(stored.ai_history_interval_seconds, 1);
+      assert.equal(stored.history_interval_seconds, .2); assert.equal(stored.record_changes, false);
+      assert.equal(mock.calls.length, count, 'Editing point policies must not call a model');
+      await page.reload(); await selectPage(page, '点位管理'); await row().waitFor();
+      const pin = (await fs.readFile(path.join(root, 'data/operator_pin.txt'), 'utf8')).trim();
+      await page.getByLabel('本机管理口令', { exact: true }).fill(pin);
+      await row().getByRole('button', { name: '编辑', exact: true }).click();
+      assert.equal(await policy().inputValue(), 'interval'); assert.equal(await interval().inputValue(), '1');
+      await page.setViewportSize({ width: 390, height: 844 });
+      await policy().scrollIntoViewIfNeeded();
+      assert.equal(await policy().isVisible(), true); assert.equal(await interval().isVisible(), true);
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth) <= 1);
+      await capture('11-point-ai-policy-mobile');
+      await page.setViewportSize({ width: 1440, height: 1080 });
+      await dialog().getByRole('button', { name: '复制为新点位以更换地址', exact: true }).click();
+      assert.equal(await policy().inputValue(), 'interval'); assert.equal(await interval().inputValue(), '1');
+      await dialog().getByRole('button', { name: '关闭编辑', exact: true }).click();
+      const filters = new URLSearchParams({ source: 'simulation', variable: tag.name, device: tag.device });
+      await eventually(async () => {
+        const raw = await fetch(base + '/api/ai/history?' + filters + '&changed_only=false').then(response => response.json());
+        return raw.items.filter(item => item.tag_revision === stored.revision).length >= 5;
+      }, 'Point with a short local save interval has insufficient history');
+      const selected = await fetch(base + '/api/ai/history?' + filters).then(response => response.json());
+      assert.equal(selected.filter.point_settings, true);
+      assert.equal(selected.filter.point_policies.find(item => item.tag_id === tag.id).ai_history_mode, 'interval');
+      assert.ok(selected.items.every(item => item.ai_history_mode === 'interval'));
+      assert.equal(mock.calls.length, count, 'Reading policies or history must not run inference');
+      await selectPage(page, '按需数据查询');
+      await page.getByLabel('设备', { exact: true }).selectOption(tag.device);
+      await page.getByLabel('分析变量', { exact: true }).selectOption(tag.name);
+      await page.getByLabel('输入问题', { exact: true }).fill('最近一周' + tag.name + '的数据有哪些变化？');
+      let submitted = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/query');
+      await page.getByRole('button', { name: '提交查询 ↗', exact: true }).click();
+      let answer = await submitted; assert.equal(answer.status(), 200);
+      let evidence = (await answer.json()).evidence;
+      assert.equal(mock.calls.length, count + 1);
+      assert.ok(evidence.history_items.length > 0 && evidence.history_items.every(item => item.ai_history_mode === 'interval'));
+      assert.deepEqual(evidence, mock.calls.at(-1).evidence);
+      await selectPage(page, '点位管理'); await row().getByRole('button', { name: '编辑', exact: true }).click();
+      await policy().selectOption('changes');
+      applied = page.waitForResponse(response => new URL(response.url()).pathname === '/api/tags' && response.request().method() === 'PUT');
+      await dialog().getByRole('button', { name: '保存点位', exact: true }).click();
+      assert.equal((await applied).status(), 200); await dialog().waitFor({ state: 'hidden' });
+      assert.equal(mock.calls.length, count + 1, 'Switching back to changes must remain idle');
+      await selectPage(page, '按需数据查询');
+      submitted = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/query');
+      await page.getByRole('button', { name: '提交查询 ↗', exact: true }).click();
+      answer = await submitted; assert.equal(answer.status(), 200); evidence = (await answer.json()).evidence;
+      assert.equal(mock.calls.length, count + 2);
+      assert.ok(evidence.history_items.length > 0 && evidence.history_items.every(item => item.ai_history_mode === 'changes'));
+      assert.deepEqual(evidence, mock.calls.at(-1).evidence);
+      await selectPage(page, '点位管理'); await row().getByRole('button', { name: '编辑', exact: true }).click();
+      await dialog().getByLabel('保存历史', { exact: true }).selectOption('false');
+      assert.equal(await policy().isEnabled(), true);
+      await policy().selectOption('interval'); await interval().fill('1');
+      assert.equal(await interval().isEnabled(), true);
+      await dialog().getByText(/当前值和此前保存的历史仍可查询/).waitFor();
+      applied = page.waitForResponse(response => new URL(response.url()).pathname === '/api/tags' && response.request().method() === 'PUT');
+      await dialog().getByRole('button', { name: '保存点位', exact: true }).click();
+      assert.equal((await applied).status(), 200); await dialog().waitFor({ state: 'hidden' });
+      assert.equal(mock.calls.length, count + 2, 'Stopping new history and changing its query policy must remain idle');
+      stored = await fetch(base + '/api/tags').then(response => response.json()).then(items => items.find(item => item.id === tag.id));
+      assert.equal(stored.save, false); assert.equal(stored.ai_history_mode, 'interval');
+      await selectPage(page, '按需数据查询');
+      submitted = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/query');
+      await page.getByRole('button', { name: '提交查询 ↗', exact: true }).click();
+      answer = await submitted; assert.equal(answer.status(), 200); evidence = (await answer.json()).evidence;
+      assert.equal(mock.calls.length, count + 3);
+      assert.ok(evidence.history_items.length > 0, 'Previously stored history must remain readable after stopping new saves');
+      assert.ok(evidence.history_items.every(item => item.ai_history_mode === 'interval'));
+      assert.deepEqual(evidence, mock.calls.at(-1).evidence);
+    });
+    await step('12 local rules restore without model calls and PLC clear options are explicit', async () => {
+      await selectPage(page, '模型设置');
       const count = mock.calls.length;
       await page.getByLabel('回答方式', { exact: true }).selectOption('local_rules');
       const saved = page.waitForResponse(response => new URL(response.url()).pathname === '/api/ai/config' && response.request().method() === 'POST');
@@ -388,7 +482,7 @@ async function main() {
       const body = candidate.request().postDataJSON(); assert.equal(body.username, ''); assert.equal(body.security_string, '');
       assert.equal(mock.calls.length, count);
     });
-    await step('12 header exit confirmation stops acquisition and the desktop process', async () => {
+    await step('13 header exit confirmation stops acquisition and the desktop process', async () => {
       await selectPage(page, 'PLC连接');
       assert.notEqual(await page.getByLabel('本机管理口令', { exact: true }).inputValue(), '');
       const shutdown = page.waitForResponse(response => new URL(response.url()).pathname === '/api/shutdown');
@@ -409,7 +503,7 @@ async function main() {
       await assert.rejects(fetch(base + '/api/health'), 'HTTP listener remains active after process exit');
       await assert.rejects(fs.access(path.join(root, 'data/gateway.pid')));
       await assert.rejects(fs.access(path.join(root, 'data/desktop-instance.json')));
-      await capture('12-ui-shutdown');
+      await capture('13-ui-shutdown');
     });
     assert.deepEqual(pageErrors, [], 'Unexpected browser JavaScript errors');
     assert.deepEqual(consoleErrors, [], 'Unexpected application console errors');
