@@ -5,7 +5,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.worksheet.datavalidation import DataValidation
 from .models import Tag
 
-HEADERS = {"ID":"id", "地址":"address", "名称":"name", "类型":"type", "单位":"unit", "权限":"permission", "AI描述":"ai_description", "保存":"save", "阈值":"threshold", "设备":"device", "NodeId":"node_id", "保存间隔秒":"history_interval_seconds", "小数位数":"precision", "记录变化":"record_changes"}
+HEADERS = {"ID":"id", "地址":"address", "名称":"name", "类型":"type", "单位":"unit", "权限":"permission", "AI描述":"ai_description", "保存":"save", "阈值":"threshold", "设备":"device", "NodeId":"node_id", "保存间隔秒":"history_interval_seconds", "小数位数":"precision", "记录变化":"record_changes", "AI取数方式":"ai_history_mode", "AI取数间隔秒":"ai_history_interval_seconds"}
 
 
 def validate_tags(items):
@@ -55,6 +55,15 @@ def import_excel(content):
                     d["history_interval_seconds"] = None
                 if d.get("precision") in (None,"","-"):
                     d["precision"] = 5
+                mode = str(d.get("ai_history_mode", "变化")).strip()
+                if mode in ("", "-"):
+                    mode = "变化"
+                modes = {"变化": "changes", "时间": "interval", "changes": "changes", "interval": "interval"}
+                if mode not in modes:
+                    raise ValueError("AI取数方式必须为变化或时间")
+                d["ai_history_mode"] = modes[mode]
+                if d.get("ai_history_interval_seconds") in (None, "", "-"):
+                    d["ai_history_interval_seconds"] = None
                 if "记录变化" in header:
                     flag = str(d.get("record_changes", "NO")).strip().upper()
                     if flag not in ("YES", "NO", "TRUE", "FALSE", "1", "0"):
@@ -75,6 +84,7 @@ def export_excel(tags):
     ws.append(list(HEADERS))
     for tag in tags:
         d = (tag if isinstance(tag, Tag) else Tag.model_validate(tag)).model_dump()
+        d["ai_history_mode"] = {"changes": "变化", "interval": "时间"}[d["ai_history_mode"]]
         row = [d[k] if k not in ("save", "record_changes") else ("YES" if d[k] else "NO") for k in HEADERS.values()]
         ws.append(row)
     for row in ws:
@@ -86,13 +96,13 @@ def export_excel(tags):
     for cell in ws[1]:
         cell.fill = PatternFill("solid", fgColor="133D45")
         cell.font = Font(color="FFFFFF", bold=True)
-    for col, width in zip("ABCDEFGHIJKLMN", [10,24,22,12,12,12,38,12,18,22,42,18,14,16]):
+    for col, width in zip("ABCDEFGHIJKLMNOP", [10,24,22,12,12,12,38,12,18,22,42,18,14,16,18,20]):
         ws.column_dimensions[col].width = width
     for row in range(2, ws.max_row+1):
         if row % 2 == 0:
             for cell in ws[row]: cell.fill = PatternFill("solid", fgColor="EDF5F4")
         ws.cell(row,9).number_format = "0.00000E+00"
-    for col, options in [("D","BOOL,WORD,DWORD,FLOAT"),("F","READ,WRITE"),("H","YES,NO"),("N","YES,NO")]:
+    for col, options in [("D","BOOL,WORD,DWORD,FLOAT"),("F","READ,WRITE"),("H","YES,NO"),("N","YES,NO"),("O","变化,时间")]:
         v = DataValidation(type="list", formula1=f'"{options}"')
         v.errorTitle = "请选择有效值"
         v.showErrorMessage = True

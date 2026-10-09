@@ -165,7 +165,7 @@ def create_app(root=ROOT):
 
     app.include_router(make_router(state))
     provider = LocalDataProvider(lambda device=None: redactor.clean(gateway.snapshot(device)), history.query,
-                                 db.tag_definition)
+                                 db.tag_definition, default_interval=lambda: history.heartbeat)
     model_service = ModelService(ai_config, provider, redactor)
     app.state.model_service = model_service
     app.include_router(ai_router(provider, model_service, state))

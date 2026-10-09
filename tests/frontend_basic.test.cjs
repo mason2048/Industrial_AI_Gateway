@@ -184,3 +184,100 @@ test('an empty point table can allocate a new point and accept a first device', 
   assert.equal(written.length, 1); assert.equal(written[0].device, '新设备'); assert.equal(written[0].id, 11);
   assert.equal(state.tagRowNumber(0), 1);
 });
+
+test('legacy points default to change evidence and AI time sampling saves a typed interval separately', async () => {
+  let stored = [{ id: 7, address: 'VD200', name: '真空', type: 'FLOAT', device: '泵01', save: true,
+    threshold: 0.00005, history_interval_seconds: 600, record_changes: false, precision: 5 }];
+  const calls = [];
+  const state = appFixture(async (url, options) => {
+    calls.push({ url, options });
+    if (url === '/api/config') return response({ mode: 'simulation', heartbeat_seconds: 1800 });
+    if (url === '/api/tags') {
+      if (options.method === 'PUT') stored = JSON.parse(options.body);
+      return response(stored);
+    }
+    throw new Error('Unexpected request: ' + url);
+  });
+  state.managerPin.value = 'operator'; await state.refresh(); await state.editTag(state.tags.value[0]);
+  assert.equal(state.editing.value.ai_history_mode, 'changes');
+  assert.equal(state.editing.value.ai_history_interval_seconds, null);
+  assert.equal(state.aiHistoryLabel(state.tags.value[0]), '按变化阈值筛选');
+  state.editing.value.ai_history_mode = 'interval'; state.editing.value.ai_history_interval_seconds = '1800';
+  await state.saveTag();
+  assert.equal(stored[0].ai_history_mode, 'interval'); assert.equal(stored[0].ai_history_interval_seconds, 1800);
+  assert.equal(stored[0].history_interval_seconds, 600); assert.equal(stored[0].record_changes, false);
+  assert.equal(stored[0].threshold, 0.00005);
+  assert.equal(calls.find(call => call.options?.method === 'PUT').options.headers['X-Operator-Pin'], 'operator');
+  await state.editTag(state.tags.value[0]);
+  assert.equal(state.editing.value.ai_history_mode, 'interval'); assert.equal(state.editing.value.ai_history_interval_seconds, 1800);
+  assert.equal(state.aiHistoryLabel(state.tags.value[0]), '按时间间隔取样');
+  assert.equal(state.aiHistoryDetail(state.tags.value[0]), '1800秒 · 从已存记录取样');
+});
+
+test('blank AI time sampling inherits local or global interval and copied points preserve the policy', async () => {
+  const original = { id: 7, address: 'VD200', name: '真空', type: 'FLOAT', device: '泵01', save: true,
+    threshold: 0.00005, history_interval_seconds: 600, record_changes: true,
+    ai_history_mode: 'interval', ai_history_interval_seconds: 900, precision: 5, revision: 2 };
+  let stored = [original];
+  const state = appFixture(async (url, options) => {
+    if (url === '/api/config') return response({ mode: 'simulation', heartbeat_seconds: 1800 });
+    if (url === '/api/tags/next-id') return response({ next_id: 8 });
+    if (url === '/api/tags') {
+      if (options.method === 'PUT') stored = JSON.parse(options.body);
+      return response(stored);
+    }
+    throw new Error('Unexpected request: ' + url);
+  });
+  state.managerPin.value = 'operator'; await state.refresh(); await state.editTag(state.tags.value[0]); await state.copyTag();
+  assert.equal(state.editing.value.ai_history_mode, 'interval'); assert.equal(state.editing.value.ai_history_interval_seconds, 900);
+  Object.assign(state.editing.value, { address: 'VD204', name: '真空副本', ai_history_interval_seconds: '  ' });
+  await state.saveTag();
+  assert.deepEqual(stored[0], original);
+  assert.equal(stored[1].ai_history_mode, 'interval'); assert.equal(stored[1].ai_history_interval_seconds, null);
+  assert.equal(state.aiHistoryDetail(stored[1]), '继承保存间隔 · 600秒 · 从已存记录取样');
+  assert.equal(state.aiHistoryDetail({ ...stored[1], history_interval_seconds: null }), '继承保存间隔 · 1800秒 · 从已存记录取样');
+});
+
+test('stopping new history keeps the AI policy editable and describes queries over existing records', async () => {
+  let stored = [{ id: 7, address: 'VD200', name: '真空', type: 'FLOAT', device: '泵01', save: true,
+    threshold: 0.00005, history_interval_seconds: 600, record_changes: false,
+    ai_history_mode: 'interval', ai_history_interval_seconds: 900, precision: 5 }];
+  const state = appFixture(async (url, options) => {
+    if (url === '/api/config') return response({ mode: 'simulation' });
+    if (url === '/api/tags') {
+      if (options.method === 'PUT') stored = JSON.parse(options.body);
+      return response(stored);
+    }
+    throw new Error('Unexpected request: ' + url);
+  });
+  state.managerPin.value = 'operator'; await state.refresh(); await state.editTag(state.tags.value[0]);
+  state.editing.value.save = false; await state.saveTag();
+  assert.equal(stored[0].save, false); assert.equal(stored[0].ai_history_mode, 'interval');
+  assert.equal(stored[0].ai_history_interval_seconds, 900);
+  assert.equal(state.aiHistoryLabel(stored[0]), '按时间间隔取样');
+  assert.equal(state.aiHistoryDetail(stored[0]), '900秒 · 从已存记录取样');
+  await state.editTag(state.tags.value[0]); state.editing.value.ai_history_mode = 'changes'; await state.saveTag();
+  assert.equal(stored[0].save, false); assert.equal(stored[0].ai_history_mode, 'changes');
+  assert.equal(stored[0].ai_history_interval_seconds, 900);
+  assert.equal(state.aiHistoryLabel(stored[0]), '按变化阈值筛选');
+  assert.equal(state.aiHistoryDetail(stored[0]), '绝对差值阈值 0.00005');
+});
+
+test('invalid AI sampling intervals keep the draft and never write the point table', async () => {
+  let writes = 0;
+  const state = appFixture(async (url, options) => {
+    if (url === '/api/config') return response({ mode: 'simulation' });
+    if (url === '/api/tags') {
+      if (options.method === 'PUT') writes++;
+      return response([{ id: 7, name: '真空', address: 'VD200', device: '泵01', type: 'FLOAT', save: true, threshold: 0 }]);
+    }
+    throw new Error('Unexpected request: ' + url);
+  });
+  await state.refresh();
+  for (const invalid of ['nope', 'Infinity', '0', '-1', '0.00001', '604801']) {
+    await state.editTag(state.tags.value[0]); state.editing.value.ai_history_mode = 'interval';
+    state.editing.value.ai_history_interval_seconds = invalid; await state.saveTag();
+    assert.equal(writes, 0); assert.equal(state.editing.value.ai_history_interval_seconds, invalid);
+    assert.match(state.modalError.value, /AI取样间隔/);
+  }
+});

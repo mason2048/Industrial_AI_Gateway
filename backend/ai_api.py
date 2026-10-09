@@ -1,5 +1,6 @@
 """On-demand, read-only process data for local questions and future AI adapters."""
 from datetime import datetime, timedelta
+import math
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from typing import Literal
@@ -11,12 +12,50 @@ class LocalDataProvider:
 
     HISTORY_SCAN_LIMIT = 500000
 
-    def __init__(self, snapshot, query_history, definition=None):
+    def __init__(self, snapshot, query_history, definition=None, default_interval=None):
         self.current = snapshot
         self.history = query_history
         self.definition = definition
+        self.default_interval = default_interval or (lambda: 1800)
 
-    def history_data(self, *, changed_only=False, scan_limit=None, **filters):
+    @staticmethod
+    def _elapsed_seconds(previous, current):
+        try:
+            start = datetime.fromisoformat(str(previous["timestamp"]).replace("Z", "+00:00"))
+            stop = datetime.fromisoformat(str(current["timestamp"]).replace("Z", "+00:00"))
+            if start.tzinfo is None or stop.tzinfo is None:
+                return None
+            return (stop - start).total_seconds()
+        except (KeyError, ValueError, TypeError, OverflowError):
+            return None
+
+    @staticmethod
+    def _history_policy(tag_id, definition, active, use_point_settings, default_interval):
+        policy = active or definition or {}
+        source = "current_point" if active is not None else "historical_definition" if definition else "default"
+        mode = policy.get("ai_history_mode", "changes") if use_point_settings else "changes"
+        if not use_point_settings:
+            source = "legacy_changes"
+        if mode not in ("changes", "interval"):
+            raise ValueError(f"点位{tag_id}的AI取数方式无效")
+        interval = None
+        interval_source = "not_used"
+        if mode == "interval":
+            choices = ((policy.get("ai_history_interval_seconds"), "ai_history_interval"),
+                       (policy.get("history_interval_seconds"), "history_interval"),
+                       (default_interval, "global_default"))
+            interval, interval_source = next((value, origin) for value, origin in choices if value is not None)
+            try:
+                interval = float(interval)
+            except (ValueError, TypeError):
+                raise ValueError(f"点位{tag_id}的AI取数间隔无效") from None
+            if not math.isfinite(interval) or not 0 < interval <= 604800:
+                raise ValueError(f"点位{tag_id}的AI取数间隔必须大于0且最多604800秒")
+        return {"tag_id": tag_id, "ai_history_mode": mode, "policy_source": source,
+                "policy_revision": policy.get("revision", 1),
+                "interval_seconds": interval, "interval_source": interval_source}
+
+    def history_data(self, *, changed_only=False, scan_limit=None, use_point_settings=False, **filters):
         """Filter an ordered range before pagination, retaining each series' baseline."""
         if not changed_only:
             return self.history(**filters)
@@ -32,8 +71,12 @@ class LocalDataProvider:
         initial_total = total = first["total"]
         concurrent_change = False
         current = self.current()
+        active_points = {t["id"]: t for t in current["items"]}
         definitions = {(t["id"], t.get("revision", 1)): t for t in current["items"]}
-        baselines, unknown, selected = {}, set(), []
+        # Freeze point preferences and the inherited global interval per request.
+        default_interval = self.default_interval()
+        policies, policy_summary = {}, {}
+        baselines, unknown, invalid_times, selected = {}, set(), set(), []
         scanned, kept = 0, 0
         batch = first["items"]
         while batch and scanned < scan_limit:
@@ -46,6 +89,14 @@ class LocalDataProvider:
                 if definition_key not in definitions:
                     definitions[definition_key] = self.definition(*definition_key) if self.definition else None
                 definition = definitions[definition_key]
+                if definition_key not in policies:
+                    policy = self._history_policy(key[0], definition, active_points.get(key[0]),
+                                                  use_point_settings, default_interval)
+                    policies[definition_key] = policy
+                    policy_key = (policy["tag_id"], policy["policy_source"], policy["policy_revision"],
+                                  policy["ai_history_mode"], policy["interval_seconds"])
+                    policy_summary[policy_key] = policy
+                policy = policies[definition_key]
                 previous = baselines.get(key)
                 reason = None
                 if previous is None:
@@ -55,6 +106,13 @@ class LocalDataProvider:
                 elif definition is None:
                     # Unknown definitions must never silently discard historical data.
                     reason = "definition_unavailable"
+                elif policy["ai_history_mode"] == "interval":
+                    elapsed = self._elapsed_seconds(previous, raw)
+                    if elapsed is None:
+                        reason = "timestamp_unavailable"
+                        invalid_times.add(definition_key)
+                    elif elapsed >= policy["interval_seconds"]:
+                        reason = "interval_sample"
                 elif raw["value"] is not None and raw["value"] != previous["value"]:
                     if raw.get("data_type") == "BOOL":
                         reason = "state_change"
@@ -68,7 +126,12 @@ class LocalDataProvider:
                     row = {**raw, "change_reason": reason,
                            "threshold": definition.get("threshold", 0) if definition else None,
                            "ai_description": definition.get("ai_description", "") if definition else "",
-                           "precision": definition.get("precision", 5) if definition else 5}
+                           "precision": definition.get("precision", 5) if definition else 5,
+                           "ai_history_mode": policy["ai_history_mode"],
+                           "ai_history_interval_seconds": policy["interval_seconds"],
+                           "ai_history_policy_source": policy["policy_source"],
+                           "ai_history_policy_revision": policy["policy_revision"],
+                           "ai_history_interval_source": policy["interval_source"]}
                     baselines[key] = raw
                     if offset <= kept < offset + limit:
                         selected.append(row)
@@ -82,18 +145,30 @@ class LocalDataProvider:
             total = max(total, next_page["total"])
         truncated = scanned < total or concurrent_change
         has_more = offset + len(selected) < kept
-        note = first.get("note", "") + " 变化数据按每个点位及定义版本的阈值比较上次保留基准；包含区间首样本、BOOL翻转和质量变化。"
+        if use_point_settings:
+            policy_note = " AI历史取数按点位当前偏好：变化模式以原定义版本的阈值比较上次保留基准；时间模式按上次选中样本的时间间隔抽取已有保存样本。两种模式均保留区间首样本和质量变化，不补造采样；退役点位使用历史定义偏好。"
+        else:
+            policy_note = " 变化数据按每个点位及定义版本的阈值比较上次保留基准；包含区间首样本、BOOL翻转和质量变化。"
+        note = first.get("note", "") + policy_note
         if truncated:
             note += f" 仅检查前{scanned}条原始记录，结果不完整；请缩短时间范围或选择单个变量。"
         if concurrent_change:
             note += " 查询期间历史记录发生变化，分页结果可能不完整；请重新查询。"
         if unknown:
             note += " 部分历史定义不可用，其记录全部保留。"
+        if invalid_times:
+            note += " 部分历史采集时间无效，保留相关记录，无法按时间间隔筛选；请检查数据。"
+        policy_items = sorted(policy_summary.values(), key=lambda row: (row["tag_id"], row["policy_source"], row["policy_revision"]))
         return {**first, "items": selected, "total": kept, "limit": limit, "offset": offset,
                 "has_more": has_more, "next_offset": offset + len(selected) if has_more else None,
-                "changed_only": True, "truncated": truncated, "note": note,
+                "changed_only": True, "use_point_settings": use_point_settings, "truncated": truncated, "note": note,
                 "filter": {"raw_total": total, "scanned": scanned, "filtered_total": kept,
                            "complete": not truncated, "scan_limit": scan_limit, "concurrent_change": concurrent_change,
+                           "point_settings": use_point_settings,
+                           "point_policies": policy_items[:1000], "point_policy_count": len(policy_items),
+                           "point_policies_truncated": len(policy_items) > 1000,
+                           "invalid_timestamps": [{"tag_id": tag_id, "tag_revision": revision}
+                                                  for tag_id, revision in sorted(invalid_times)],
                            "unknown_definitions": [{"tag_id": tag_id, "tag_revision": revision}
                                                    for tag_id, revision in sorted(unknown)]},
                 "summary_scope": "all_saved_samples_in_range"}
@@ -231,14 +306,15 @@ def router(provider, model_service=None, state=None):
                 end: str | None=None, source: Literal['simulation','opcua'] | None=None,
                 limit: int=Query(2000,ge=1,le=10000),offset: int=Query(0,ge=0),
                 connection_id: str | None=None, tag_revision: int | None=Query(None,ge=1),
-                changed_only: bool=True):
+                changed_only: bool=True, use_point_settings: bool=True):
         current = provider.current()
         selected_source = source or current['mode']
         if connection_id is None and selected_source == current['mode']:
             connection_id = current.get('connection_id')
         return provider.history_data(device=device,variable=variable,start=start,end=end,source=selected_source,
                                      limit=limit,offset=offset,connection_id=connection_id,
-                                     tag_revision=tag_revision,changed_only=changed_only)
+                                     tag_revision=tag_revision,changed_only=changed_only,
+                                     use_point_settings=use_point_settings)
 
     @api.get("/status")
     def status(device: str | None=None): return provider.status(device)
